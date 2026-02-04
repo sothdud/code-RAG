@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: code_rag_qdrant_new
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+    restart: always
+
+  memgraph:
+    image: memgraph/memgraph-platform:latest
+    container_name: code_rag_memgraph_new
+    ports:
+      - "7444:7444"
+      - "7687:7687"  # Bolt protocol (접속 포트)
+      - "3001:3000"  # Memgraph Lab (시각화 도구)
+    environment:
+      - MEMGRAPH_USER=admin
+      - MEMGRAPH_PASSWORD=password
+    restart: always
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: code_rag_ollama_new
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    # 👇 GPU 할당 섹션 (NVIDIA Container Toolkit 설치 필수)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all

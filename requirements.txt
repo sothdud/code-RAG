@@ -1,0 +1,19 @@
+qdrant-client==1.7.3
+sentence-transformers==2.5.1
+tree-sitter==0.21.3
+tree-sitter-languages==1.10.2
+requests
+python-dotenv
+einops
+torch
+neo4j
+rank_bm25
+rich>=13.0.0          # ✨ 터미널 UX 개선
+loguru>=0.7.0         # ✨ 로깅
+pydantic>=2.0.0       # ✨ 에러 진단 API용 (FastAPI 사용 시)
+fastapi>=0.100.0      # ✨ 에러 진단 API용 (선택)
+uvicorn>=0.23.0  
+
+# torch는 아래 주석 참고하여 별도 설치 권장
+## [변경 전] cu118 (구형) -> [변경 후] cu121 (RTX 40시리즈 최적화)
+#pip download -d ./packages torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
