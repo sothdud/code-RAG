@@ -30,6 +30,36 @@ class ASTParser:
             ) @function
         """)
 
+    def _normalize_filepath(self, filepath: str) -> str:
+        """
+        ⭐ 핵심 수정: 경로에서 연속된 중복 디렉토리 제거
+        
+        예:
+        - docs/api/dreamer/dreamer/afi/model.py 
+          → docs/api/dreamer/afi/model.py
+        
+        - src/utils/utils/helper.py
+          → src/utils/helper.py
+        """
+        try:
+            path_obj = Path(filepath)
+            parts = list(path_obj.parts)
+            
+            # 연속된 중복 제거
+            cleaned_parts = []
+            prev_part = None
+            
+            for part in parts:
+                if part != prev_part:  # 이전과 다르면 추가
+                    cleaned_parts.append(part)
+                prev_part = part
+            
+            return str(Path(*cleaned_parts)) if cleaned_parts else filepath
+            
+        except Exception as e:
+            # 에러 발생 시 원본 경로 반환
+            return filepath
+
     def _extract_imports(self, code_bytes: bytes) -> dict[str, str]:
         """파일 상단의 Import 구문을 텍스트 파싱으로 신속하게 분석"""
         imports = {}
@@ -70,9 +100,12 @@ class ASTParser:
         if not filepath.endswith(".py"): return []
 
         try:
-            # ✨ [추가] 경로 객체 준비
+            # ⭐ 경로 정규화 (중복 제거)
+            normalized_filepath = self._normalize_filepath(filepath)
+            
+            # 실제 파일은 원본 경로로 읽기
             path_obj = Path(filepath)
-            repo_root = Path(".").resolve()  # 현재 실행 위치를 프로젝트 루트로 가정
+            repo_root = Path(".").resolve()
 
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 code_text = f.read()
@@ -96,17 +129,17 @@ class ASTParser:
                 if not name_node: continue
                 func_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf8")
 
-                # ✨ [핵심 변경] 새로 만든 resolver 사용
+                # FQN 생성
                 qualified_name = resolve_fqn_from_ast(
                     func_node=node,
-                    file_path=path_obj,
+                    file_path=Path(normalized_filepath),  # ⭐ 정규화된 경로 사용
                     repo_root=repo_root,
                     code_bytes=code_bytes
                 )
 
-                # 실패 시 안전장치 (파일명.함수명)
+                # 실패 시 안전장치
                 if not qualified_name:
-                    qualified_name = f"{path_obj.stem}.{func_name}"
+                    qualified_name = f"{Path(normalized_filepath).stem}.{func_name}"
 
                 # Docstring 추출
                 docstring = ""
@@ -138,33 +171,28 @@ class ASTParser:
 
                 valid_calls = []
                 for c in calls:
-                    c = c.strip() # 앞뒤 공백 제거
+                    c = c.strip()
                     
-                    # 1. 빈 문자열이면 버림
                     if not c: continue
                     
-                    # 2. '공백'이나 '특수문자'가 섞여있으면 무조건 버림 (함수 이름 아님)
-                    # (함수명에는 띄어쓰기, =, #, <, >, 괄호 등이 절대 못 들어감)
                     if any(char in c for char in [' ', '=', '#', '<', '>', '(', ')', '[', ']', '{', '}', ':', ',']):
                         continue
                         
-                    # 3. 너무 길거나(50자), 너무 짧으면(1자) 버림
                     if len(c) > 50 or len(c) < 2:
                         continue
                         
                     valid_calls.append(c)
                 
-                # 깨끗한 리스트로 교체
                 calls = valid_calls
 
                 chunks.append(CodeChunk(
                     name=func_name,
                     type=tag,
                     content=chunk_content,
-                    filepath=filepath,
+                    filepath=normalized_filepath,  # ⭐ 정규화된 경로 저장
                     start_line=start_line_idx + 1,
                     language="python",
-                    qualified_name=qualified_name,  # 정확한 경로가 들어감
+                    qualified_name=qualified_name,
                     module_path=qualified_name.rsplit('.', 1)[0] if '.' in qualified_name else "",
                     imports=file_imports,
                     docstring=docstring,
