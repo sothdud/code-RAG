@@ -182,19 +182,27 @@ def main():
             # ===================================================================
             # Step 1: 질문 유형 자동 감지 (LLM 사용)
             # ===================================================================
-            # [수정] 이제 llm 객체를 함께 넘겨줍니다.
             with console.status("[bold blue]🤔 Intent Classification...[/bold blue]"):
                 query_info = detect_query_type(query, llm)
                 
             console.print(f"[dim]🔎 Detected: {query_info['type'].upper()} (Keywords: {query_info.get('keywords', [])})[/dim]")
 
             # ===================================================================
-            # Step 2: 검색 전략 선택
+            # Step 2: 검색 전략 선택 ⭐ 개선됨!
             # ===================================================================
             with console.status("[bold blue]🔍 Searching code...[/bold blue]"):
                 
+                # ⭐ 특정 함수명이 언급된 경우 SmartSearchEngine 사용 (정확 매칭)
+                if query_info.get('target_name'):
+                    console.print(f"[cyan]🎯 Target function: {query_info['target_name']}[/cyan]")
+                    if query_info.get('filename'):
+                        console.print(f"[cyan]📁 In file: {query_info['filename']}[/cyan]")
+                    
+                    # 개선된 search 엔진 사용 (정확한 함수명 매칭 로직 포함)
+                    results = engine.search(query, top_k=10)
+                
                 # 1. 다중 파일 검색
-                if len(query_info['filenames']) > 1:
+                elif len(query_info['filenames']) > 1:
                     console.print(f"[cyan]📁 Multi-target: {', '.join(query_info['filenames'])}[/cyan]")
                     results = []
                     for fname in query_info['filenames']:
@@ -202,7 +210,7 @@ def main():
                         payloads = [r.payload if hasattr(r, 'payload') else r for r in f_res]
                         results.extend(payloads)
 
-                # 2. 단일 파일 검색
+                # 2. 단일 파일 검색 (함수명 없는 경우만)
                 elif query_info['filename']:
                     console.print(f"[cyan]📁 Target file: {query_info['filename']}[/cyan]")
                     all_results = db.search_by_filepath(query_info['filename'], top_k=1000)
@@ -212,10 +220,6 @@ def main():
                         continue
                     
                     results = [r.payload if hasattr(r, 'payload') else r for r in all_results]
-                    if query_info['target_name']:
-                        target_chunks = [r for r in results if query_info['target_name'] in r.get('name', '')]
-                        other_chunks = [r for r in results if query_info['target_name'] not in r.get('name', '')]
-                        results = target_chunks + other_chunks
                     results = results[:50]
                     
                 # 3. 에러 트레이스백 처리
@@ -232,62 +236,45 @@ def main():
                         
                 # 4. 일반 Smart Search
                 else:
-                    # [추가] LLM이 추출한 키워드가 있다면 검색에 활용 (없으면 원본 쿼리)
                     search_query = " ".join(query_info.get('keywords', [])) if query_info.get('keywords') else query
-                    # 너무 짧으면 그냥 원본 쿼리 사용
                     if len(search_query) < 5: search_query = query
                     results = engine.search(search_query, top_k=5)
-                # [2] ✨ 여기부터 새로 추가되는 "Graph 확장" 로직입니다 ✨
-                # (1차 검색이 끝난 후, results를 가지고 2차 탐색을 합니다)
-                # ---------------------------------------------------------------
+                
+                # ⭐ Graph 확장 (기존 로직 유지)
                 if results:
-                    # console.print(f"[dim]🕸️ Expanding context via Knowledge Graph...[/dim]") # 너무 시끄러우면 주석 처리
                     expanded_results = []
                     existing_names = set()
                     
-                    # 이미 찾은 1차 결과들의 이름을 등록 (중복 방지용)
                     for r in results:
                         if isinstance(r, dict) and 'chunk' in r:
                             existing_names.add(r['chunk'].get('qualified_name'))
                         elif isinstance(r, dict):
                             existing_names.add(r.get('qualified_name'))
                     
-                    # 상위 5개 결과에 대해서만 "이 함수가 호출하는 친구들"을 찾아봄
                     for r in results[:5]: 
                         current_qn = None
                         if isinstance(r, dict) and 'chunk' in r:
                             current_qn = r['chunk'].get('qualified_name')
                         
                         if current_qn:
-                            # 그래프 DB에 물어봄: "얘가 누구 호출해?"
                             callee_names = graph_store.get_callees(current_qn)
                             
                             for callee in callee_names:
-                                # 처음 보는 함수라면? -> 벡터 DB에서 코드를 가져옴!
                                 if callee not in existing_names:
-                                    # 주의: search 메서드는 텍스트 검색이므로 정확도를 위해 qualified_name 필터링 필요
-                                    # 여기서는 간단히 키워드 검색 후 이름 비교
                                     callee_hits = db.search(callee, top_k=3)
                                     for hit in callee_hits:
                                         payload = hit.payload if hasattr(hit, 'payload') else hit
-                                        
-                                        # 이름이 정확히 일치하는지 확인 (검색 정확도 보정)
                                         hit_qn = payload.get('qualified_name') or payload.get('chunk', {}).get('qualified_name')
                                         
                                         if hit_qn == callee:
                                             expanded_results.append(payload)
                                             existing_names.add(callee)
-                                            # console.print(f"[dim cyan]  └─ Link found: {callee.split('.')[-1]}[/dim cyan]")
-                                            break # 찾았으면 다음 callee로
+                                            break
 
-                    # 확장된 결과가 있으면 원래 결과 뒤에 붙임
                     if expanded_results:
                         console.print(f"[dim cyan]🕸️ Graph Expanded: +{len(expanded_results)} related functions[/dim cyan]")
                         results.extend(expanded_results)
 
-                # ---------------------------------------------------------------
-
-                
                 if not results:
                     console.print("[red]❌ 관련 코드를 찾을 수 없습니다.[/red]")
                     continue

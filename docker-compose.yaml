@@ -39,3 +39,4 @@ services:
               capabilities: [gpu]
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+      - OLLAMA_HOST=0.0.0.0
