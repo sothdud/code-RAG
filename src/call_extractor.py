@@ -10,21 +10,13 @@ class CallExtractor:
         self.language = get_language(language)
         self.parser = get_parser(language)
 
-        # 1. 일반 함수 호출 쿼리
+        # Python용 Tree-sitter 쿼리
         self.call_query = self.language.query("""
             (call
                 function: [
                     (identifier) @func_name
                     (attribute) @method_name
                 ]
-            )
-        """)
-        
-        # 2. 속성 접근 쿼리 (UI 위젯 참조 감지용: self.widgetName)
-        self.attr_query = self.language.query("""
-            (attribute
-                object: (identifier) @obj
-                attribute: (identifier) @attr
             )
         """)
 
@@ -41,67 +33,79 @@ class CallExtractor:
         """함수명이 유효한지 검증"""
         if not name or not isinstance(name, str):
             return False
-        name = name.strip()
-        if not name: return False
-        if len(name) < 2 or len(name) > 50: return False
         
+        name = name.strip()
+        
+        # 빈 문자열
+        if not name:
+            return False
+        
+        # 길이 제한 (일반적인 함수명 길이)
+        if len(name) < 2 or len(name) > 50:
+            return False
+        
+        # Python 함수명 규칙: 영문자, 숫자, 언더스코어, 점(모듈 참조)만 허용
+        # 단, 첫 글자는 숫자 불가
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_.]*$', name):
+            return False
+        
+        # 특수문자가 포함된 코드 조각 제거
+        invalid_chars = [' ', '=', '#', '<', '>', '(', ')', '[', ']', '{', '}', ':', ',', ';', '"', "'", '`', '\\', '/', '|', '&', '*', '+', '-', '%', '!', '?', '@', '$', '^']
+        if any(char in name for char in invalid_chars):
+            return False
+        
+        # 숫자로만 이루어진 경우
+        if name.isdigit():
+            return False
+        
+        # 언더스코어나 점으로만 이루어진 경우
+        if all(c in ['_', '.'] for c in name):
+            return False
+        
+        # Python 예약어 제외 (선택사항)
         python_keywords = {
-            'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue',
-            'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
+            'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
+            'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
+            'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
             'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return',
             'try', 'while', 'with', 'yield'
         }
         if name in python_keywords:
             return False
         
-        # 특수문자 포함 여부 체크
-        if any(char in name for char in [' ', '=', '#', '<', '>', '(', ')', '[', ']', '{', '}', ':', ',']):
-            return False
-            
         return True
 
     def extract_calls(self, code: str) -> list[str]:
-        """코드에서 호출하는 모든 함수 및 UI 위젯 참조 추출"""
+        """코드에서 호출하는 모든 함수 추출"""
         try:
             tree = self.parser.parse(bytes(code, "utf8"))
-            
-            calls = set()
-            
-            # 1. 함수 호출 추출
             captures = self.call_query.captures(tree.root_node)
+
+            calls = []
             for node, tag in captures:
                 func_name = code[node.start_byte:node.end_byte]
+                
+                # ⭐ 유효성 검증 추가
                 if self._is_valid_function_name(func_name):
-                    calls.add(func_name)
+                    calls.append(func_name)
 
-            # 2. [개선] 속성 접근 추출 (self.xxx)
-            attr_captures = self.attr_query.captures(tree.root_node)
-            for node, tag in attr_captures:
-                full_text = code[node.start_byte:node.end_byte]
-                if full_text.startswith("self."):
-                    # 'self.runAutoLabelButton.clicked.connect(...)'
-                    # → 'runAutoLabelButton' 추출
-                    parts = full_text.split('.', 2)  # ['self', 'runAutoLabelButton', 'clicked.connect(...)']
-                    if len(parts) > 1:
-                        attr_name = parts[1]
-                        # 메서드 체인 첫 번째 속성만 추출
-                        if self._is_valid_function_name(attr_name):
-                            calls.add(attr_name)
-
-            return list(calls)
+            return list(set(calls))  # 중복 제거
         except Exception as e:
             print(f"⚠️ Call extraction error: {e}")
             return []
 
     def extract_imports(self, code: str) -> list[str]:
-        """import 문 추출 (기존 유지)"""
+        """import 문 추출"""
         try:
             tree = self.parser.parse(bytes(code, "utf8"))
             captures = self.import_query.captures(tree.root_node)
 
             imports = []
             for node, tag in captures:
-                imports.append(code[node.start_byte:node.end_byte])
+                import_name = code[node.start_byte:node.end_byte]
+                imports.append(import_name)
+
             return list(set(imports))
-        except:
+        except Exception as e:
+            print(f"⚠️ Import extraction error: {e}")
             return []

@@ -1,6 +1,7 @@
 import os
 
 # 1. 메모리 파편화 방지
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import uuid
@@ -11,7 +12,7 @@ from qdrant_client.models import PointStruct, VectorParams, Distance, Filter, Fi
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from dotenv import load_dotenv
 from .models import CodeChunk
-from qdrant_client.models import MatchAny # 이 import가 꼭 있어야 합니다
+from qdrant_client.models import MatchAny # ì´ importê°€ ê¼­ ìžˆì–´ì•¼ í•©ë‹ˆë‹¤
 
 load_dotenv()
 
@@ -24,61 +25,61 @@ class VectorStore:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_path = os.getenv("EMBEDDING_MODEL_PATH", "jinaai/jina-embeddings-v2-base-en")
 
-        print(f"📡 Loading Embedding Model: {model_path}")
-        print(f"🚀 Acceleration Device: {device.upper()}")
+        print(f"ðŸ“¡ Loading Embedding Model: {model_path}")
+        print(f"ðŸš€ Acceleration Device: {device.upper()}")
 
-        print("⚖️ Loading Reranker Model...")
+        print("âš–ï¸ Loading Reranker Model...")
         self.reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2',
                                      device=device)
         
         self.embedder = SentenceTransformer(model_path, device=device, trust_remote_code=True)
         self.embedding_dim = self.embedder.get_sentence_embedding_dimension()
-        print(f"📏 Embedding Dimension: {self.embedding_dim}")
+        print(f"ðŸ“ Embedding Dimension: {self.embedding_dim}")
 
-        # 초기 연결 테스트
+        # ì´ˆê¸° ì—°ê²° í…ŒìŠ¤íŠ¸
         try:
             self._ensure_collection_exists()
         except Exception as e:
-            print(f"⚠️ DB Connection Error: {e}")
+            print(f"âš ï¸ DB Connection Error: {e}")
 
     def _ensure_collection_exists(self):
-        """[v1.7.3 호환] 컬렉션 목록을 직접 조회하여 확인"""
+        """[v1.7.3 í˜¸í™˜] ì»¬ë ‰ì…˜ ëª©ë¡ì„ ì§ì ‘ ì¡°íšŒí•˜ì—¬ í™•ì¸"""
         try:
             response = self.client.get_collections()
             exists = any(c.name == self.collection for c in response.collections)
 
             if not exists:
-                print(f"📦 Creating new collection: {self.collection}")
+                print(f"ðŸ“¦ Creating new collection: {self.collection}")
                 self.client.create_collection(
                     collection_name=self.collection,
                     vectors_config=VectorParams(size=self.embedding_dim, distance=Distance.COSINE)
                 )
         except Exception as e:
-            print(f"⚠️ Error checking collection: {e}")
+            print(f"âš ï¸ Error checking collection: {e}")
 
     def recreate_collection(self):
-        """[v1.7.3 호환] 컬렉션 삭제 후 재생성"""
-        print(f"🗑️ Recreating Qdrant collection: {self.collection}")
+        """[v1.7.3 í˜¸í™˜] ì»¬ë ‰ì…˜ ì‚­ì œ í›„ ìž¬ìƒì„±"""
+        print(f"ðŸ—‘ï¸ Recreating Qdrant collection: {self.collection}")
         
         try:
-            # 1. 현재 목록 가져오기
+            # 1. í˜„ìž¬ ëª©ë¡ ê°€ì ¸ì˜¤ê¸°
             response = self.client.get_collections()
             exists = any(c.name == self.collection for c in response.collections)
 
-            # 2. 있으면 삭제
+            # 2. ìžˆìœ¼ë©´ ì‚­ì œ
             if exists:
                 self.client.delete_collection(self.collection)
-                print("  ✓ Existing collection deleted.")
+                print("  âœ“ Existing collection deleted.")
             
-            # 3. 새로 생성
+            # 3. ìƒˆë¡œ ìƒì„±
             self.client.create_collection(
                 collection_name=self.collection,
                 vectors_config=VectorParams(size=self.embedding_dim, distance=Distance.COSINE)
             )
-            print("  ✓ New collection created.")
+            print("  âœ“ New collection created.")
 
         except Exception as e:
-            print(f"⚠️ Error recreating collection: {e}")
+            print(f"âš ï¸ Error recreating collection: {e}")
 
     def upsert_chunks(self, chunks: list[CodeChunk], batch_size: int = 5):
         total = len(chunks)
@@ -91,13 +92,13 @@ class VectorStore:
             for chunk in batch:
                 clean_calls = []
                 for call in chunk.calls:
-                    # 1. 문자열인지 확인 (혹시 모를 오류 방지)
+                    # 1. ë¬¸ìžì—´ì¸ì§€ í™•ì¸ (í˜¹ì‹œ ëª¨ë¥¼ ì˜¤ë¥˜ ë°©ì§€)
                     if not isinstance(call, str): continue
                     
-                    # 2. 필터링 조건
-                    # - 공백이 있다? -> 주석일 확률 99% (함수명엔 공백 없음)
-                    # - #, <, >, =, : 같은 특수문자가 있다? -> 코드 파편임
-                    # - 길이가 너무 길다(50자 이상)? -> 문장일 확률 높음
+                    # 2. í•„í„°ë§ ì¡°ê±´
+                    # - ê³µë°±ì´ ìžˆë‹¤? -> ì£¼ì„ì¼ í™•ë¥  99% (í•¨ìˆ˜ëª…ì—” ê³µë°± ì—†ìŒ)
+                    # - #, <, >, =, : ê°™ì€ íŠ¹ìˆ˜ë¬¸ìžê°€ ìžˆë‹¤? -> ì½”ë“œ íŒŒíŽ¸ìž„
+                    # - ê¸¸ì´ê°€ ë„ˆë¬´ ê¸¸ë‹¤(50ìž ì´ìƒ)? -> ë¬¸ìž¥ì¼ í™•ë¥  ë†’ìŒ
                     if any(char in call for char in [' ', '#', '<', '>', '=', ':']):
                         continue
                     if len(call) > 50:
@@ -148,10 +149,10 @@ class VectorStore:
                         points=points,
                         wait=True
                     )
-                    print(f"  ✓ Saved batch {i // batch_size + 1}/{(total + batch_size - 1) // batch_size}")
+                    print(f"  âœ“ Saved batch {i // batch_size + 1}/{(total + batch_size - 1) // batch_size}")
 
             except Exception as e:
-                print(f"  ✗ Batch {i // batch_size + 1} failed: {e}")
+                print(f"  âœ— Batch {i // batch_size + 1} failed: {e}")
 
             finally:
                 if 'vectors' in locals(): del vectors
@@ -179,7 +180,7 @@ class VectorStore:
             )
             return results[0]
         except Exception as e:
-            print(f"⚠️ File search error: {e}")
+            print(f"âš ï¸ File search error: {e}")
             return []
 
     def hybrid_search(self, query: str, filepath_keyword: str = None, top_k: int = 5):
@@ -196,14 +197,14 @@ class VectorStore:
                 limit=top_k
             )
         except Exception as e:
-            print(f"⚠️ Hybrid search error: {e}")
+            print(f"âš ï¸ Hybrid search error: {e}")
             return []
 
     def load_call_graph(self):
         from .models import CallGraph
         from collections import defaultdict
 
-        print("🔄 Loading call graph from Qdrant...")
+        print("ðŸ”„ Loading call graph from Qdrant...")
         try:
             all_points = []
             offset = None
@@ -218,9 +219,9 @@ class VectorStore:
                 points, offset = result
                 all_points.extend(points)
                 if offset is None: break
-            print(f"  ✓ Loaded {len(all_points)} functions from Qdrant")
+            print(f"  âœ“ Loaded {len(all_points)} functions from Qdrant")
         except Exception as e:
-            print(f"⚠️ Error loading from Qdrant: {e}")
+            print(f"âš ï¸ Error loading from Qdrant: {e}")
             return CallGraph(nodes={}, edges={}, reverse_edges={})
 
         nodes = {}
@@ -275,5 +276,5 @@ class VectorStore:
             )
             return [res.payload for res in results if res.payload]
         except Exception as e:
-            print(f"⚠️ Error retrieving by names: {e}")
+            print(f"âš ï¸ Error retrieving by names: {e}")
             return []
