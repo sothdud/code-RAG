@@ -18,14 +18,11 @@ class SmartSearchEngine:
         # ---------------------------------------------------------
         # 🚀 [NEW] BM25 인덱스 초기화 (메모리 로드)
         # ---------------------------------------------------------
-        # 서버 시작 시 Qdrant에 있는 모든 코드를 가져와서 BM25 인덱스를 만듭니다.
-        # (코드 RAG 특성상 '정확한 변수명/함수명' 매칭을 위해 필수입니다.)
         logger.info("⏳ Initializing BM25 Index from Vector Store...")
         
         self.all_chunks = self._fetch_all_docs_from_db()
         
         if self.all_chunks:
-            # 코드 특화 토크나이징 적용
             tokenized_corpus = [self._tokenize_code(doc.get('content', '')) for doc in self.all_chunks]
             self.bm25 = BM25Okapi(tokenized_corpus)
             logger.success(f"✅ BM25 Index Ready! (Loaded {len(self.all_chunks)} chunks)")
@@ -38,7 +35,6 @@ class SmartSearchEngine:
         코드용 토크나이저: snake_case, CamelCase, 특수문자 등을 분리하여 인덱싱
         예: "INVALID_KEY" -> ["invalid", "key"]
         """
-        # 특수문자를 공백으로 치환
         clean_text = re.sub(r"[_\.\(\)\[\]\{\}\=\:\,\;\"\'\/]", " ", text)
         return clean_text.lower().split()
 
@@ -47,7 +43,6 @@ class SmartSearchEngine:
         try:
             all_points = []
             offset = None
-            # Qdrant scroll 기능으로 전체 데이터 순회
             while True:
                 points, offset = self.db.client.scroll(
                     collection_name=self.db.collection,
@@ -56,7 +51,6 @@ class SmartSearchEngine:
                     with_payload=True,
                     with_vectors=False
                 )
-                # payload(메타데이터+content)만 저장
                 for p in points:
                     if p.payload:
                         all_points.append(p.payload)
@@ -77,9 +71,8 @@ class SmartSearchEngine:
 
         # 1. Vector 결과 점수 매기기
         for rank, item in enumerate(vector_results):
-            # Qdrant 결과는 객체이므로 payload 접근
             payload = item.payload if hasattr(item, 'payload') else item
-            doc_id = payload.get('qualified_name') or payload.get('filepath') # 고유 키
+            doc_id = payload.get('qualified_name') or payload.get('filepath')
             
             if not doc_id: continue
 
@@ -89,7 +82,6 @@ class SmartSearchEngine:
 
         # 2. BM25 결과 점수 매기기
         for rank, item in enumerate(bm25_results):
-            # BM25 결과는 딕셔너리(payload) 그 자체
             doc_id = item.get('qualified_name') or item.get('filepath')
             
             if not doc_id: continue
@@ -101,25 +93,86 @@ class SmartSearchEngine:
         # 3. 점수 높은 순 정렬
         sorted_results = sorted(fusion_scores.values(), key=lambda x: x['score'], reverse=True)
         
-        # 문서 객체만 반환
         return [item['doc'] for item in sorted_results]
 
     def _extract_filenames(self, query: str) -> list[str]:
         """질문에서 .py 파일명들을 추출"""
         return re.findall(r'\b[\w-]+\.py\b', query)
+    
+    def _extract_function_names(self, query: str) -> list[str]:
+        """
+        질문에서 함수명/클래스명을 추출
+        예: "predict_tree_klarf가 뭐해?" -> ["predict_tree_klarf"]
+        """
+        # Python 함수명 패턴: snake_case, camelCase
+        pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]{1,49})\b'
+        candidates = re.findall(pattern, query)
+        
+        # 일반 영단어 제외
+        common_words = {'what', 'does', 'how', 'why', 'where', 'when', 
+                       'function', 'class', 'method', 'file', 'code', 'this',
+                       'that', 'the', 'is', 'are', 'do', 'can', 'will', 'from'}
+        
+        function_names = []
+        for c in candidates:
+            # 최소 3자 이상이거나 언더스코어 포함
+            if (len(c) >= 3 or '_' in c) and c.lower() not in common_words:
+                function_names.append(c)
+        
+        return function_names
+    
+    def _get_exact_function_chunks(self, function_names: list[str]) -> list:
+        """
+        ⭐ 함수명과 정확히 일치하는 청크들을 직접 가져오기
+        (검색 순위와 무관하게 반드시 포함시키기 위함)
+        """
+        if not function_names or not self.all_chunks:
+            return []
+        
+        exact_matches = []
+        seen_qns = set()  # 중복 방지
+        
+        for chunk in self.all_chunks:
+            chunk_name = chunk.get('name', '')
+            qn = chunk.get('qualified_name', '')
+            
+            if qn in seen_qns:
+                continue
+            
+            # 함수명이 정확히 일치하거나 qualified_name 끝부분이 일치
+            for target_name in function_names:
+                if chunk_name == target_name or qn.endswith(f'.{target_name}'):
+                    exact_matches.append(chunk)
+                    seen_qns.add(qn)
+                    logger.info(f"  ✅ Exact match found: {qn}")
+                    break
+        
+        return exact_matches
 
     def search(self, query: str, top_k: int = 5):
         """
         [하이브리드 검색 파이프라인]
-        1. Keyword Search (BM25): 정확한 단어 매칭
-        2. Vector Search (Dense): 의미적 유사성
-        3. RRF Fusion: 순위 혼합
-        4. Reranking (Cross-Encoder): [NEW!] 정밀 재검증
-        5. Context Expansion: Graph DB 문맥 보강
+        1. ⭐ Exact Function Name Matching (NEW!)
+        2. Keyword Search (BM25): 정확한 단어 매칭
+        3. Vector Search (Dense): 의미적 유사성
+        4. RRF Fusion: 순위 혼합
+        5. Reranking (Cross-Encoder): 정밀 재검증
+        6. Context Expansion: Graph DB 문맥 보강
         """
         print(f"🔎 Hybrid Searching for: '{query}'")
 
-        # 1. 파일명 필터 확인 (기존 로직 유지)
+        # ---------------------------------------------------------
+        # ⭐ 0. 함수명 정확 매칭 (NEW!)
+        # ---------------------------------------------------------
+        target_functions = self._extract_function_names(query)
+        exact_function_chunks = []
+        
+        if target_functions:
+            print(f"  🎯 Detected function names: {target_functions}")
+            exact_function_chunks = self._get_exact_function_chunks(target_functions)
+            print(f"  ✅ Found {len(exact_function_chunks)} exact matches")
+        
+        # 1. 파일명 필터 확인
         target_files = self._extract_filenames(query)
         search_filters = None
         if target_files:
@@ -136,7 +189,6 @@ class SmartSearchEngine:
         # ---------------------------------------------------------
         # 2. Vector Search (Dense)
         # ---------------------------------------------------------
-        # RRF를 위해 넉넉하게(4배수) 가져옵니다.
         vector_candidates = self.db.search(query, top_k=top_k * 4, query_filter=search_filters)
         
         # ---------------------------------------------------------
@@ -152,7 +204,6 @@ class SmartSearchEngine:
         # ---------------------------------------------------------
         print(f"  🧬 Fusing: Vector({len(vector_candidates)}) + BM25({len(bm25_candidates)})")
         
-        # 여기서 나온 후보군은 약 20~40개 정도입니다.
         candidates_before_rerank = self.reciprocal_rank_fusion(
             vector_candidates, 
             bm25_candidates, 
@@ -160,17 +211,39 @@ class SmartSearchEngine:
         )
 
         # ---------------------------------------------------------
-        # 🔥 [4.5] Reranking (Cross-Encoder) 추가된 부분
+        # ⭐ 4.5 정확히 일치하는 함수를 최상위에 삽입 (NEW!)
         # ---------------------------------------------------------
-        # RRF 결과 중 상위 20개만 추려서 리랭커에게 검사 맡깁니다.
+        if exact_function_chunks:
+            # 중복 제거: exact match가 이미 후보에 있으면 제거
+            exact_qns = {c.get('qualified_name') for c in exact_function_chunks}
+            candidates_before_rerank = [
+                c for c in candidates_before_rerank 
+                if c.get('qualified_name') not in exact_qns
+            ]
+            
+            # 정확 매칭을 맨 앞에 추가
+            candidates_before_rerank = exact_function_chunks + candidates_before_rerank
+            print(f"  🎯 Exact matches promoted to top!")
+
+        # ---------------------------------------------------------
+        # 5. Reranking (Cross-Encoder)
+        # ---------------------------------------------------------
         slice_for_rerank = candidates_before_rerank[:20]
         
         if slice_for_rerank:
             print(f"  ⚖️ Reranking top {len(slice_for_rerank)} candidates...")
             
-            # database.py의 rerank 메서드가 (query, results, top_k)를 받아 
-            # 점수순으로 정렬하여 최종 top_k개만 돌려줍니다.
-            final_results = self.db.rerank(query, slice_for_rerank, top_k=top_k)
+            # ⭐ 개선: 정확 매칭 함수는 rerank에서도 높은 우선순위 유지
+            if exact_function_chunks:
+                # 정확 매칭은 무조건 포함
+                non_exact = [c for c in slice_for_rerank if c not in exact_function_chunks]
+                # rerank는 나머지에만 적용
+                reranked_rest = self.db.rerank(query, non_exact, top_k=max(1, top_k - len(exact_function_chunks)))
+                final_results = exact_function_chunks + reranked_rest
+                # top_k 개수 맞추기
+                final_results = final_results[:top_k]
+            else:
+                final_results = self.db.rerank(query, slice_for_rerank, top_k=top_k)
         else:
             final_results = []
 
@@ -179,12 +252,11 @@ class SmartSearchEngine:
             return []
 
         # ---------------------------------------------------------
-        # 5. Graph Context Expansion (기존 변수명 유지)
+        # 6. Graph Context Expansion
         # ---------------------------------------------------------
         enhanced_results = []
 
         for i, payload in enumerate(final_results):
-            # payload는 딕셔너리 형태
             qualified_name = payload.get('qualified_name')
 
             context_entry = {
@@ -195,10 +267,9 @@ class SmartSearchEngine:
 
             if qualified_name:
                 # 1. 실행 흐름 가져오기 (Graph)
-                # 리랭킹으로 순위가 바뀌었으므로, 이제 진짜 중요한 상위권 녀석들만 Graph를 탑니다.
                 context_entry["flow_context"] = self.graph.get_execution_flow(qualified_name, depth=2)
 
-                # 2. 상위 3개만 Callee(호출하는 함수) 코드 가져오기
+                # 2. 상위 3개만 Callee 코드 가져오기
                 if i < 3:
                     callees = self.graph.get_callees(qualified_name)
                     if callees:

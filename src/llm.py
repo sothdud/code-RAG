@@ -25,8 +25,10 @@ class LocalLLM:
             }
         }
         try:
-            response = requests.post(self.api_url, json=payload, timeout=300)
+            response = requests.post(self.api_url, json=payload, timeout=500)
             response.raise_for_status()
             return json.loads(response.text)['response']
         except Exception as e:
             return f"❌ Error: {str(e)}"
+        
+        

@@ -37,9 +37,10 @@ class ContextBuilder:
         """
 
             # 토큰 수 추정 (1 token ≈ 4 chars)
-            estimated_tokens = len(func_info) // 4
+            estimated_tokens = len(func_info) // 3
 
             if current_tokens + estimated_tokens > max_tokens:
+                
                 break
 
             context_parts.append(func_info)

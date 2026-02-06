@@ -89,6 +89,23 @@ class VectorStore:
             texts_to_embed = []
 
             for chunk in batch:
+                clean_calls = []
+                for call in chunk.calls:
+                    # 1. 문자열인지 확인 (혹시 모를 오류 방지)
+                    if not isinstance(call, str): continue
+                    
+                    # 2. 필터링 조건
+                    # - 공백이 있다? -> 주석일 확률 99% (함수명엔 공백 없음)
+                    # - #, <, >, =, : 같은 특수문자가 있다? -> 코드 파편임
+                    # - 길이가 너무 길다(50자 이상)? -> 문장일 확률 높음
+                    if any(char in call for char in [' ', '#', '<', '>', '=', ':']):
+                        continue
+                    if len(call) > 50:
+                        continue
+                        
+                    clean_calls.append(call)
+                chunk.calls = clean_calls
+                
                 meta_parts = [
                     f"Name: {chunk.name}",
                     f"Type: {chunk.type}",
