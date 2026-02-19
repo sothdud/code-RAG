@@ -22,6 +22,7 @@ services:
       - MEMGRAPH_PASSWORD=password
     restart: always
 
+
   ollama:
     image: ollama/ollama:latest
     container_name: code_rag_ollama_new

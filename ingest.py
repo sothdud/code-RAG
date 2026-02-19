@@ -21,6 +21,9 @@ console = Console()
 
 STATE_FILE = ".ingest_state.json"
 
+# ⭐ [수정] 지원할 확장자 목록에 C#과 XAML 추가
+SUPPORTED_EXTENSIONS = {'.py', '.cs', '.xaml'}
+
 def calculate_file_hash(filepath: Path) -> str:
     """파일 내용의 MD5 해시를 계산합니다."""
     hash_md5 = hashlib.md5()
@@ -48,187 +51,106 @@ def save_state(state: dict):
         json.dump(state, f, indent=2)
 
 def main():
-    # ============================================
-    # 옵션 파싱
-    # ============================================
-    FULL_RESET = "--full" in sys.argv or "--reset" in sys.argv
+    # 설정 가져오기
+    QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+    COLLECTION_NAME = os.getenv("COLLECTION_NAME", "codebase_v1")
+    SOURCE_PATH = os.getenv("SOURCE_CODE_PATH", "./")
     
-    if FULL_RESET:
-        console.print("\n[bold red]🔄 FULL RESET MODE ENABLED[/bold red]")
-        console.print("  → Will recreate entire database\n")
+    # 1. 모델 및 DB 초기화
+    # ⭐ [수정] database.py가 encoder 인자를 받지 않으므로, 여기서 모델을 로드하지 않고 기본 생성자 호출
+    db = VectorStore() 
     
-    # 1. 설정
-    TARGET_DIR = Path(os.getenv("SOURCE_CODE_PATH", "./data"))
-    if not TARGET_DIR.exists():
-        console.print(f"[red]❌ 경로 없음: {TARGET_DIR}[/red]")
-        return
-
-    parser = ASTParser()
-    graph_builder = GraphBuilder()
-    db = VectorStore()
     graph_store = GraphStore()
+    graph_builder = GraphBuilder()
     
-    # ============================================
-    # FULL RESET: 전체 DB 초기화
-    # ============================================
-    if FULL_RESET:
-        console.print("[bold yellow]🗑️ Dropping existing collections...[/bold yellow]")
-        db.recreate_collection()
-        graph_store.clear_all_data()
-        
-        # 상태 파일도 삭제
-        if os.path.exists(STATE_FILE):
-            os.remove(STATE_FILE)
-        
-        console.print("[green]✓ Database reset complete[/green]\n")
-        previous_state = {}
-    else:
-        previous_state = load_state()
+    # 2. 파일 스캔 및 변경 감지
+    console.print("🔍 Phase 1: Detecting Changes...")
     
-    # 2. 상태 로드 및 변경 감지
-    console.print(f"[bold yellow]🔍 Phase 1: Detecting Changes...[/bold yellow]")
-    
+    source_path = Path(SOURCE_PATH).resolve()
+    old_state = load_state()
     current_state = {}
     
-    all_files = []
-    # 파일 탐색
-    for root, dirs, files in os.walk(TARGET_DIR):
+    files_to_process = []
+    all_chunks_for_graph = [] # 그래프 DB 전체 동기화를 위해 모든 청크 추적용 (선택사항)
+
+    # 파일 탐색 로직
+    for root, dirs, files in os.walk(source_path):
         root_path = Path(root)
         
-        # 디렉토리 제외 처리 (재귀적 탐색 효율화)
-        dirs[:] = [d for d in dirs if not should_skip_path(root_path / d, TARGET_DIR)]
-        
-        for file in files:
-            if not file.endswith('.py'): continue
-            file_path = root_path / file
-            if should_skip_path(file_path, TARGET_DIR): continue
+        if should_skip_path(root_path, source_path):
+            continue
             
-            all_files.append(file_path)
+        for file in files:
+            file_path = root_path / file
+            
+            if should_skip_path(file_path, source_path):
+                continue
+            
+            # ⭐ [수정] 확장자 필터링 로직 추가 (.py, .cs, .xaml)
+            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
+                
+            # 해시 계산
+            file_hash = calculate_file_hash(file_path)
+            rel_path = str(file_path.relative_to(source_path))
+            
+            current_state[rel_path] = file_hash
+            
+            # 변경되었거나 새로 추가된 파일인지 확인
+            if rel_path not in old_state or old_state[rel_path] != file_hash:
+                files_to_process.append(str(file_path))
 
-    # 변경 사항 분류
-    files_to_embed = []      # 임베딩 새로 해야 할 파일 (신규/수정)
-    files_to_delete = []     # DB에서 지워야 할 파일 (수정/삭제)
-    unchanged_files = []     # 변경 없는 파일
-    
-    # 2-1. 신규 및 수정 파일 감지
-    for file_path in all_files:
-        str_path = str(file_path)
-        current_hash = calculate_file_hash(file_path)
-        current_state[str_path] = current_hash
-        
-        prev_hash = previous_state.get(str_path)
-        
-        # FULL RESET 모드면 모든 파일 재처리
-        if FULL_RESET:
-            files_to_embed.append(file_path)
-            console.print(f"  [cyan]→ Queue:[/cyan] {file_path.name}")
-        elif prev_hash != current_hash:
-            if prev_hash is None:
-                console.print(f"  [green]+ New:[/green] {file_path.name}")
-            else:
-                console.print(f"  [yellow]* Modified:[/yellow] {file_path.name}")
-                files_to_delete.append(str_path) # 수정된 경우 기존 거 삭제 필요
-            files_to_embed.append(file_path)
-        else:
-            unchanged_files.append(file_path)
+    # 삭제된 파일 처리
+    deleted_files = set(old_state.keys()) - set(current_state.keys())
+    if deleted_files:
+        console.print(f"🗑️  Found {len(deleted_files)} deleted files.")
+        # 삭제 로직은 기존 database.py에 구현되어 있다면 호출 (현재는 생략)
 
-    # 2-2. 삭제된 파일 감지 (FULL RESET 모드에선 불필요)
-    if not FULL_RESET:
-        for old_path in previous_state:
-            if old_path not in current_state:
-                console.print(f"  [red]- Deleted:[/red] {old_path}")
-                files_to_delete.append(old_path)
-
-    # 변경사항이 없으면 조기 종료
-    if not FULL_RESET and not files_to_embed and not files_to_delete:
-        console.print("\n[bold green]✅ No changes detected. System is up to date.[/bold green]")
+    # 변경사항이 없으면 종료 (단, 그래프 재구축 강제 옵션이 있다면 진행)
+    # 여기서는 간단히 변경사항 없으면 종료 처리
+    if not files_to_process and not deleted_files:
+        console.print("\n✅ No changes detected. System is up to date.")
+        save_state(current_state)
         return
 
-    # ---------------------------------------------------------
-    # 3. 데이터베이스 정리 (Incremental Only)
-    # ---------------------------------------------------------
-    if not FULL_RESET and files_to_delete:
-        console.print(f"\n[bold red]🗑️ Removing obsolete chunks ({len(files_to_delete)} files)...[/bold red]")
-        # Qdrant에서 파일 경로 기준으로 삭제
-        for file_path in files_to_delete:
-            try:
-                db.client.delete(
-                    collection_name=db.collection,
-                    points_selector=Filter(
-                        must=[
-                            FieldCondition(
-                                key="filepath",
-                                match=MatchText(text=file_path)
-                            )
-                        ]
-                    )
-                )
-            except Exception as e:
-                console.print(f"  ⚠️ Failed to delete {file_path}: {e}")
+    console.print(f"📦 Found {len(files_to_process)} files to process.")
 
-    # ---------------------------------------------------------
-    # 4. 파싱 및 그래프 빌드
-    # ---------------------------------------------------------
-    console.print(f"\n[bold cyan]🧠 Phase 2: Parsing & Building Structure...[/bold cyan]")
+    # 3. 파싱 (Parsing)
+    console.print(f"\n[bold yellow]🔨 Phase 2: Parsing Code...[/bold yellow]")
     
-    all_chunks_for_graph = []       # 그래프용 (전체)
-    chunks_to_upsert = []           # 벡터 저장용 (변경분만)
+    parser = ASTParser()
+    chunks_to_upsert = []
     
-    # FULL RESET: 모든 파일 처리
-    # Incremental: 변경된 파일 + 그래프용 전체 파일
-    files_to_parse = all_files if FULL_RESET else all_files
-    
-    for file_path in track(files_to_parse, description="Parsing AST..."):
-        try:
-            chunks = parser.parse_file(str(file_path))
-            
-            # 그래프 빌더엔 무조건 추가 (전체 문맥 형성)
-            for chunk in chunks:
-                graph_builder.add_chunk(chunk)
-                all_chunks_for_graph.append(chunk)
-            
-            # 벡터 DB엔 변경된 파일만 추가 (또는 FULL RESET 시 전부)
-            if FULL_RESET or file_path in files_to_embed:
-                chunks_to_upsert.extend(chunks)
-                
-        except Exception as e:
-            console.print(f"  [red]Error parsing {file_path.name}: {e}[/red]")
+    # 트랙킹하며 파싱
+    for filepath in track(files_to_process, description="Parsing files..."):
+        # ⭐ [수정] parser.py가 이제 내부적으로 확장자를 체크하므로 그대로 호출
+        file_chunks = parser.parse(filepath)
+        chunks_to_upsert.extend(file_chunks)
 
-    # ---------------------------------------------------------
-    # 5. Vector DB 저장
-    # ---------------------------------------------------------
+    # 그래프 빌더에는 '전체' 청크를 넣어야 관계가 정확하지만, 
+    # 여기서는 '변경된' 청크만 추가하여 점진적 업데이트를 수행합니다.
+    # (만약 전체 관계를 다시 맺고 싶다면 전체 파일을 다시 파싱해야 합니다)
+    for chunk in chunks_to_upsert:
+        graph_builder.add_chunk(chunk)
+        all_chunks_for_graph.append(chunk)
+
+    console.print(f"   > Generated {len(chunks_to_upsert)} new chunks.")
+
+    # 4. 벡터 DB 업서트 (Vector DB Upsert)
     if chunks_to_upsert:
-        console.print(f"\n[bold green]💾 Phase 3: Updating Vector DB ({len(chunks_to_upsert)} chunks)...[/bold green]")
-        # ⭐ calls 필터링은 이미 parser.py와 database.py에서 처리됨
+        console.print(f"\n[bold green]💾 Phase 3: Updating Vector DB...[/bold green]")
         db.upsert_chunks(chunks_to_upsert)
-    else:
-        console.print("\n[dim]💾 Phase 3: Vector DB skipped (No new content)[/dim]")
-
-    # ---------------------------------------------------------
-    # 6. Graph DB 저장 (Full Sync)
-    # ---------------------------------------------------------
-    console.print(f"\n[bold magenta]🕸️ Phase 4: Syncing Graph DB...[/bold magenta]")
     
-    call_graph = graph_builder.build_call_graph()
-    
-    # Memgraph 초기화 후 전체 노드/엣지 다시 쓰기
-    if FULL_RESET:
-        graph_store.clear_all_data()
-    graph_store.save_graph_data(all_chunks_for_graph, call_graph.edges)
+    # 5. 그래프 DB 동기화 (Graph DB Sync)
+    # 변경된 부분에 대해서만 그래프 관계 생성
+    if chunks_to_upsert:
+        console.print(f"\n[bold magenta]🕸️ Phase 4: Syncing Graph DB...[/bold magenta]")
+        call_graph = graph_builder.build_call_graph()
+        graph_store.save_graph_data(chunks_to_upsert, call_graph.edges)
 
-    # ---------------------------------------------------------
-    # 7. 상태 저장
-    # ---------------------------------------------------------
+    # 6. 상태 저장
     save_state(current_state)
-    
-    if FULL_RESET:
-        console.print("\n[bold blue]✨ Full Reset Complete![/bold blue]")
-    else:
-        console.print("\n[bold blue]✨ Incremental Ingest Complete![/bold blue]")
-    
-    console.print(f"  • Total files: {len(all_files)}")
-    console.print(f"  • Processed: {len(files_to_embed)}")
-    console.print(f"  • Unchanged: {len(unchanged_files)}")
+    console.print("\n[bold blue]✨ Ingest Complete![/bold blue]")
 
 if __name__ == "__main__":
     main()

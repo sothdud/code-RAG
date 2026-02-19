@@ -5,34 +5,48 @@ from .source_extraction import extract_source_lines
 # 🏭 System Context & Graph Schema
 # ===================================================================
 
-# 30B 모델은 이 스키마 정보를 이해하고 "코드 간 연결성"을 추론할 수 있습니다.
+# 🆕 Multi-language 지원 명시
 GRAPH_SCHEMA_INFO = """
 <knowledge_graph_schema>
-The Knowledge Graph currently stores **Function Call Relationships** only:
-- **Nodes**: `Function` (Attributes: name, filepath, qualified_name)
-- **Edges**: `(:Function)-[:CALLS]->(:Function)`
+The Knowledge Graph stores **Function/Method Call Relationships** for multiple languages:
 
-Use this to trace logic flow (e.g., "Which function calls `login`?").
-Note: Class inheritance or module imports are NOT explicitly stored in the graph.
+**Supported Languages:**
+- Python (.py)
+- C# (.cs)
+- XAML (.xaml) - WPF View definitions
+
+**Nodes:**
+- `Function` (Python functions)
+- `Method` (C# methods, Python class methods)
+- `Property` (C# properties, for MVVM binding)
+- `View` (XAML views)
+
+**Edges:**
+- `(:Function)-[:CALLS]->(:Function)` - Function calls
+- `(:Method)-[:CALLS]->(:Method)` - Method calls
+- `(:View)-[:BINDS]->(:Property)` - XAML data binding
+
+**Naming Conventions:**
+- Python: `module.path.ClassName.method_name`
+- C#: `Namespace.ClassName.MethodName`
+- XAML: `Namespace.ViewName`
+
+Use this to trace logic flow across languages (e.g., "Which C# method does this XAML button call?").
 </knowledge_graph_schema>
 """
 
-SYSTEM_PROMPT = f"""You are an expert Senior Python Code Analyst.
-Your goal is to analyze the provided code context and answer the user's query accurately.
+SYSTEM_PROMPT = f"""You're a helpful coding assistant analyzing a codebase that contains Python, C#, and XAML code.
 
 {GRAPH_SCHEMA_INFO}
 
-### 🧠 CRITICAL THINKING PROCESS
-Before answering, you must "think" inside <thinking> tags:
-1. **Context Verification**: Check provided <file> tags. Do not assume code not present in context.
-2. **Logic Tracing**: Trace the execution flow (Caller -> Callee).
-3. **Graph Reasoning**: Use the graph schema to infer relationships between components.
-4. **Answer Formulation**: Provide a structured, evidence-based answer.
+**Response style:**
+- Use Korean polite form (존댓말): 합니다/습니다/해요/네요 (NOT 해/야/어)
+- Talk like explaining to a colleague - conversational but professional
+- Cite code locations: "ObjectTestViewModel.cs 269번 줄에서..."
+- If info is missing from context: acknowledge what you found + guide next steps (don't just say "없어요" and stop)
 
-### 🚫 STRICT RULES
-- **No Hallucination**: If the code is not in <context>, say "Code not provided".
-- **Citations**: Always cite file paths and line numbers (e.g., `main.py:10`).
-- **Language**: Answer in Korean (한국어).
+**Process:**
+Use <thinking> to analyze, then answer clearly in polite Korean.
 """
 
 # ===================================================================
@@ -41,7 +55,7 @@ Before answering, you must "think" inside <thinking> tags:
 
 def format_context_xml(results: list) -> str:
     """
-    검색 결과를 XML 형식으로 변환 (모델이 파일 경계를 명확히 인식함)
+    검색 결과를 XML 형식으로 변환 (언어 구분 명시)
     """
     xml_context = "<context>\n"
     
@@ -51,16 +65,20 @@ def format_context_xml(results: list) -> str:
             content = data.get('content', '')
             filepath = data.get('filepath', 'unknown')
             start_line = data.get('start_line', 1)
+            language = data.get('language', 'unknown')
+            chunk_type = data.get('type', 'code')
         elif isinstance(item, dict) and 'filepath' in item:
             data = item
             content = item.get('content', '') or item.get('fullContent', '')
             filepath = item.get('filepath', 'unknown')
             start_line = item.get('start_line', 1)
+            language = item.get('language', 'unknown')
+            chunk_type = item.get('type', 'code')
         else:
             continue
 
         xml_context += f"""
-    <file index="{idx}" path="{filepath}" start_line="{start_line}">
+    <file index="{idx}" path="{filepath}" start_line="{start_line}" language="{language}" type="{chunk_type}">
 <![CDATA[
 {content}
 ]]>
@@ -78,140 +96,92 @@ def build_smart_search_context(results: list) -> str:
 
 
 # ===================================================================
-# 🎯 Task-Specific Prompts
+# 🎯 Task-Specific Prompts (Multi-language)
 # ===================================================================
 
 def get_existence_check_prompt(query: str, context: str, target_name: str) -> str:
     return f"""
 {SYSTEM_PROMPT}
 
-<task>
-Verify if the function or class `{target_name}` exists and explain its role.
-</task>
-
+Here's the code:
 {context}
 
-<user_query>
-{query}
-</user_query>
+Question: {query}
 
-Let's think step by step in <thinking> tags. Check if `{target_name}` is defined or just imported.
+Check if `{target_name}` exists and what it does. Use <thinking> to look through the code, then answer naturally.
 """
 
 def get_flow_analysis_prompt(query: str, context: str) -> str:
     return f"""
 {SYSTEM_PROMPT}
 
-<task>
-Trace the execution flow based on the user's query.
-Focus on data transformation, arguments passing, and return values.
-</task>
-
+Here's the code:
 {context}
 
-<user_query>
-{query}
-</user_query>
+Question: {query}
 
-<output_format>
-### 🚀 실행 흐름 분석
-
-1. **[Step 1] Function Name** (`filepath:line`)
-   - **Input**: ...
-   - **Logic**: ...
-   - **Call**: `func()` → ...
-
-2. **[Step 2] ...**
-</output_format>
-
-Let's think step by step in <thinking> tags. Trace variables across functions.
+Trace through the execution flow and explain how things work. Use <thinking> to analyze, then explain it naturally like you're walking someone through the code.
 """
 
 def get_bug_analysis_prompt(query: str, context: str) -> str:
     return f"""
 {SYSTEM_PROMPT}
 
-<task>
-Analyze the code for potential bugs, logical errors, or edge cases mentioned in the query.
-</task>
-
+Here's the code:
 {context}
 
-<user_query>
-{query}
-</user_query>
+Question: {query}
 
-<output_format>
-### 🎯 버그 분석 결과
-
-**[결론]**: (발견됨 / 없음 / 정보부족)
-
-#### 🔴 발견된 문제 (if any)
-1. **문제점**: ...
-   - 📍 **위치**: `filepath:line`
-   - 📝 **원인**: ...
-   - ✅ **수정 제안**:
-     ```python
-     # Corrected Code
-     ```
-</output_format>
-
-Let's think step by step in <thinking> tags.
+Look for bugs, edge cases, or potential issues. Use <thinking> to analyze, then explain what you found conversationally.
 """
 
 def get_file_summary_prompt(query: str, context: str, filename: str) -> str:
     return f"""
 {SYSTEM_PROMPT}
 
-<task>
-Summarize the structure, responsibility, and key dependencies of `{filename}`.
-</task>
-
+Here's the code from `{filename}`:
 {context}
 
-<user_query>
-{query}
-</user_query>
+Question: {query}
 
-Let's think step by step in <thinking> tags.
+Summarize what this file does. Use <thinking> to analyze it, then explain like you're giving a quick overview to a teammate.
 """
 
-def get_error_diagnostic_prompt(query: str, context: str, error_traceback: str) -> str:
+def get_error_diagnostic_prompt(query: str, context: str, error_traceback: str, language: str = "python") -> str:
     return f"""
 {SYSTEM_PROMPT}
 
-<task>
-Diagnose the error based on the traceback and the provided code.
-Match the traceback line numbers with the code context to find the root cause.
-</task>
-
-<traceback>
+Here's the error:
 {error_traceback}
-</traceback>
 
+And here's the relevant code:
 {context}
 
-<user_query>
-{query}
-</user_query>
+Question: {query}
 
-Let's think step by step in <thinking> tags.
+Debug this {language} error. Use <thinking> to match the traceback to the code, then explain what's wrong and how to fix it.
+"""
+
+def get_mvvm_analysis_prompt(query: str, context: str) -> str:
+    return f"""
+{SYSTEM_PROMPT}
+
+Here's the code:
+{context}
+
+Question: {query}
+
+Analyze the MVVM architecture - how the View, ViewModel, and Model connect. Use <thinking> to trace the bindings and data flow, then explain it naturally.
 """
 
 def get_general_prompt(query: str, context: str) -> str:
     return f"""
 {SYSTEM_PROMPT}
 
-<task>
-Answer the user's general coding question based on the context.
-Utilize the Knowledge Graph Schema to explain how components interact.
-</task>
-
+Here's the relevant code:
 {context}
 
-<user_query>
-{query}
-</user_query>
+Question: {query}
 
-Let's think step by step in <thinking> tags.
+Analyze the code in <thinking> tags, then answer naturally like you're chatting with a teammate.
 """

@@ -1,7 +1,5 @@
 import os
 
-# 1. 메모리 파편화 방지
-
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import uuid
@@ -12,16 +10,15 @@ from qdrant_client.models import PointStruct, VectorParams, Distance, Filter, Fi
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from dotenv import load_dotenv
 from .models import CodeChunk
-from qdrant_client.models import MatchAny # ì´ importê°€ ê¼­ ìžˆì–´ì•¼ í•©ë‹ˆë‹¤
+from qdrant_client.models import MatchAny 
 
 load_dotenv()
 
 
 class VectorStore:
-    def __init__(self):
+    def __init__(self, collection_name: str = None):
         self.client = QdrantClient(url=os.getenv("QDRANT_URL"))
-        self.collection = os.getenv("COLLECTION_NAME")
-
+        self.collection = collection_name or os.getenv("COLLECTION_NAME")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model_path = os.getenv("EMBEDDING_MODEL_PATH", "jinaai/jina-embeddings-v2-base-en")
 
@@ -92,13 +89,9 @@ class VectorStore:
             for chunk in batch:
                 clean_calls = []
                 for call in chunk.calls:
-                    # 1. ë¬¸ìžì—´ì¸ì§€ í™•ì¸ (í˜¹ì‹œ ëª¨ë¥¼ ì˜¤ë¥˜ ë°©ì§€)
                     if not isinstance(call, str): continue
                     
-                    # 2. í•„í„°ë§ ì¡°ê±´
-                    # - ê³µë°±ì´ ìžˆë‹¤? -> ì£¼ì„ì¼ í™•ë¥  99% (í•¨ìˆ˜ëª…ì—” ê³µë°± ì—†ìŒ)
-                    # - #, <, >, =, : ê°™ì€ íŠ¹ìˆ˜ë¬¸ìžê°€ ìžˆë‹¤? -> ì½”ë“œ íŒŒíŽ¸ìž„
-                    # - ê¸¸ì´ê°€ ë„ˆë¬´ ê¸¸ë‹¤(50ìž ì´ìƒ)? -> ë¬¸ìž¥ì¼ í™•ë¥  ë†’ìŒ
+
                     if any(char in call for char in [' ', '#', '<', '>', '=', ':']):
                         continue
                     if len(call) > 50:

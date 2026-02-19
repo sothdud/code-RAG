@@ -1,207 +1,237 @@
 import os
+import re
+from pathlib import Path
+from typing import List, Optional
+
 from tree_sitter_languages import get_language, get_parser
 from .models import CodeChunk
 from .call_extractor import CallExtractor
 from .fqn_resolver import resolve_fqn_from_ast
-from pathlib import Path
-
+from .language_specs import PYTHON_SPEC, CSHARP_SPEC,XAML_SPEC
 
 class ASTParser:
     def __init__(self, context_lines: int = 5):
-        """
-        Args:
-            context_lines (int): 청크 생성 시 함수/클래스 전후로 포함할 문맥 라인 수.
-        """
-        self.language = get_language("python")
-        self.parser = get_parser("python")
-        self.call_extractor = CallExtractor("python")
         self.context_lines = context_lines
+        
+        # 1. 언어별 스펙 로드
+        self.specs = {
+            ".py": PYTHON_SPEC,
+            ".cs": CSHARP_SPEC,
+            ".xaml": XAML_SPEC
+        }
+        
+        self.parsers = {}
+        self.queries = {}
+        self.call_extractors = {}
+        self.csharp_call_query = None
 
-        # 1. 함수와 클래스 추출 쿼리 (구조 + 독스트링 포함)
-        self.structure_query = self.language.query("""
-            (class_definition
-                name: (identifier) @name
-                body: (block) @body
-            ) @class
+        # 2. 파서 및 쿼리 초기화
+        for ext, spec in self.specs.items():
+            try:
+                lang = get_language(spec.name)
+                self.parsers[ext] = get_parser(spec.name)
+                self.queries[ext] = lang.query(spec.structure_query)
+                
+                # Python은 기존 CallExtractor 사용
+                if ext == ".py":
+                    self.call_extractors[ext] = CallExtractor(spec.name)
+                # C#은 별도 쿼리 로드
+                elif ext == ".cs":
+                    self.csharp_call_query = lang.query(spec.call_query)
+                    
+            except Exception as e:
+                print(f"⚠️ Failed to load parser for {spec.name}: {e}")
 
-            (function_definition
-                name: (identifier) @name
-                body: (block) @body
-            ) @function
-        """)
+    def parse(self, filepath: str) -> List[CodeChunk]:
+        """ingest.py에서 호출하는 메인 메서드"""
+        ext = os.path.splitext(filepath)[1].lower()
+
+        # 1. XAML 처리 (정규식)
+        if ext == ".xaml":
+            return self._parse_xaml(filepath)
+
+        # 2. 코드 파일 (.py, .cs) 처리 (Tree-sitter)
+        if ext in self.specs:
+            return self._parse_code(filepath, ext)
+
+        return []
 
     def _normalize_filepath(self, filepath: str) -> str:
+        """경로 정규화"""
+        path = Path(filepath)
+        parts = path.parts
+        new_parts = []
+        for i, part in enumerate(parts):
+            if i > 0 and part == parts[i-1]:
+                continue
+            new_parts.append(part)
+        return str(Path(*new_parts))
+
+    def _read_file_as_utf8_bytes(self, filepath: str) -> bytes:
         """
-        ⭐ 핵심 수정: 경로에서 연속된 중복 디렉토리 제거
-        
-        예:
-        - docs/api/dreamer/dreamer/afi/model.py 
-          → docs/api/dreamer/afi/model.py
-        
-        - src/utils/utils/helper.py
-          → src/utils/helper.py
+        파일을 읽어서 UTF-8 바이트로 변환합니다.
+        원본 인코딩을 자동 감지하여 안전하게 변환합니다.
         """
-        try:
-            path_obj = Path(filepath)
-            parts = list(path_obj.parts)
-            
-            # 연속된 중복 제거
-            cleaned_parts = []
-            prev_part = None
-            
-            for part in parts:
-                if part != prev_part:  # 이전과 다르면 추가
-                    cleaned_parts.append(part)
-                prev_part = part
-            
-            return str(Path(*cleaned_parts)) if cleaned_parts else filepath
-            
-        except Exception as e:
-            # 에러 발생 시 원본 경로 반환
-            return filepath
+        # 시도할 인코딩 목록 (순서 중요)
+        encodings = ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'latin-1']
+        
+        for enc in encodings:
+            try:
+                with open(filepath, 'r', encoding=enc) as f:
+                    content = f.read()
+                # 성공적으로 읽었으면 UTF-8 바이트로 변환하여 반환
+                return content.encode('utf-8')
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                # 이 인코딩이 아니면 다음 것으로 시도
+                continue
+            except Exception as e:
+                print(f"⚠️ Read Error {filepath}: {e}")
+                return b""
+        
+        # 모든 인코딩 시도 실패
+        print(f"❌ Failed to decode {filepath} with any standard encoding.")
+        return b""
+    
+    def _read_file_safe(self, filepath: str) -> str:
+        """XAML 등 문자열이 필요한 경우를 위한 헬퍼 메서드"""
+        encodings = ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'latin-1']
+        
+        for enc in encodings:
+            try:
+                with open(filepath, 'r', encoding=enc) as f:
+                    return f.read()
+            except UnicodeDecodeError:
+                continue
+            except Exception as e:
+                print(f"⚠️ Read Error {filepath}: {e}")
+                return ""
+        
+        print(f"❌ Failed to decode {filepath} with any standard encoding.")
+        return ""
 
-    def _extract_imports(self, code_bytes: bytes) -> dict[str, str]:
-        """파일 상단의 Import 구문을 텍스트 파싱으로 신속하게 분석"""
-        imports = {}
+    def _parse_xaml(self, filepath: str) -> List[CodeChunk]:
+        """XAML 파싱"""
         try:
-            code_str = code_bytes.decode('utf-8', errors='ignore')
-            for line in code_str.split('\n'):
-                line = line.strip()
-                if line.startswith("import "):
-                    # ex: import os, sys
-                    parts = line.replace("import ", "").split(" as ")
-                    if len(parts) == 2:
-                        imports[parts[1].strip()] = parts[0].strip()
-                    else:
-                        for p in parts[0].split(','):
-                            p = p.strip()
-                            imports[p] = p
-                elif line.startswith("from "):
-                    # ex: from .models import CodeChunk
-                    try:
-                        parts = line.split(" import ")
-                        if len(parts) < 2: continue
-                        module = parts[0].replace("from ", "").strip()
-                        names = parts[1].split(",")
-                        for name in names:
-                            name = name.strip()
-                            if " as " in name:
-                                orig, alias = name.split(" as ")
-                                imports[alias.strip()] = f"{module}.{orig.strip()}"
-                            else:
-                                imports[name] = f"{module}.{name}"
-                    except:
-                        continue
-        except Exception:
-            pass
-        return imports
-
-    def parse_file(self, filepath: str) -> list[CodeChunk]:
-        if not filepath.endswith(".py"): return []
-
-        try:
-            # ⭐ 경로 정규화 (중복 제거)
+            content = self._read_file_safe(filepath)
+            if not content: return []
+            
             normalized_filepath = self._normalize_filepath(filepath)
+            chunks = []
+
+            # x:Class 추출
+            x_class_match = re.search(r'x:Class="([^"]+)"', content)
+            if x_class_match:
+                qualified_name = x_class_match.group(1)
+                name = qualified_name.split('.')[-1]
+            else:
+                name = Path(filepath).stem
+                qualified_name = name
+
+            # Binding 추출
+            bindings = re.findall(r'\{Binding\s+(?:Path=)?([a-zA-Z0-9_.]+)', content)
+            valid_bindings = sorted(list(set([b for b in bindings if b])))
+
+            chunks.append(CodeChunk(
+                name=name,
+                type="view",
+                content=content,
+                filepath=normalized_filepath,
+                start_line=1,
+                language="xaml",
+                qualified_name=qualified_name,
+                module_path=str(Path(filepath).parent),
+                calls=valid_bindings,
+                docstring="WPF XAML View"
+            ))
+            return chunks
+        except Exception as e:
+            print(f"⚠️ Error parsing XAML {filepath}: {e}")
+            return []
+
+    def _parse_code(self, filepath: str, ext: str) -> List[CodeChunk]:
+        """코드 파싱 (Python/C#)"""
+        try:
+            # 1. ✅ 직접 UTF-8 바이트로 읽기 (재인코딩 문제 방지)
+            code_bytes = self._read_file_as_utf8_bytes(filepath)
+            if not code_bytes: 
+                return []
             
-            # 실제 파일은 원본 경로로 읽기
-            path_obj = Path(filepath)
-            repo_root = Path(".").resolve()
-
-            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-                code_text = f.read()
-
-            code_bytes = bytes(code_text, "utf8")
-            code_lines = code_text.splitlines()
-            total_lines = len(code_lines)
-
-            tree = self.parser.parse(code_bytes)
-            file_imports = self._extract_imports(code_bytes)
+            # 2. 디코딩해서 문자열도 준비 (정규식 검색용)
+            try:
+                code = code_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                print(f"⚠️ Failed to decode UTF-8 bytes for {filepath}")
+                return []
+            
+            parser = self.parsers.get(ext)
+            query = self.queries.get(ext)
+            
+            if not parser or not query:
+                return []
+            
+            tree = parser.parse(code_bytes)
+            captures = query.captures(tree.root_node)
 
             chunks = []
-            captures = self.structure_query.captures(tree.root_node)
             processed_nodes = set()
+            normalized_filepath = self._normalize_filepath(filepath)
 
             for node, tag in captures:
-                if node in processed_nodes: continue
+                if node in processed_nodes:
+                    continue
+                if tag == "namespace_block": 
+                    continue 
 
-                # 기본 함수명 추출
-                name_node = node.child_by_field_name('name')
-                if not name_node: continue
-                func_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf8")
-
-                # FQN 생성
-                qualified_name = resolve_fqn_from_ast(
-                    func_node=node,
-                    file_path=Path(normalized_filepath),  # ⭐ 정규화된 경로 사용
-                    repo_root=repo_root,
-                    code_bytes=code_bytes
-                )
-
-                # 실패 시 안전장치
-                if not qualified_name:
-                    qualified_name = f"{Path(normalized_filepath).stem}.{func_name}"
-
-                # Docstring 추출
-                docstring = ""
-                body_node = node.child_by_field_name('body')
-                if body_node:
-                    for child in body_node.children:
-                        if child.type == 'expression_statement':
-                            first_child = child.children[0] if child.children else None
-                            if first_child and first_child.type == 'string':
-                                doc = code_bytes[first_child.start_byte:first_child.end_byte].decode("utf8")
-                                docstring = doc.strip('"""').strip("'''").strip()
-                                break
-                        elif child.type == 'comment':
-                            continue
-                        else:
-                            break
-
-                # Context 추출
-                start_line_idx = node.start_point[0]
-                end_line_idx = node.end_point[0]
-                context_start = max(0, start_line_idx - self.context_lines)
-                context_end = min(total_lines, end_line_idx + 1 + self.context_lines)
-
-                chunk_content = "\n".join(code_lines[context_start:context_end])
-
-                # Call Extractor
-                pure_content = code_bytes[node.start_byte:node.end_byte].decode("utf8")
-                calls = self.call_extractor.extract_calls(pure_content)
-
-                valid_calls = []
-                for c in calls:
-                    c = c.strip()
-                    
-                    if not c: continue
-                    
-                    if any(char in c for char in [' ', '=', '#', '<', '>', '(', ')', '[', ']', '{', '}', ':', ',']):
-                        continue
-                        
-                    if len(c) > 50 or len(c) < 2:
-                        continue
-                        
-                    valid_calls.append(c)
+                start_line = node.start_point[0]
                 
-                calls = valid_calls
+                # 이름 추출
+                name_node = node.child_by_field_name('name')
+                if not name_node: 
+                    continue
+                
+                func_name = code_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8")
+                
+                # 내용 추출
+                chunk_content = code_bytes[node.start_byte:node.end_byte].decode("utf-8")
+                
+                # Qualified Name & Calls 처리
+                qualified_name = func_name
+                calls = []
+
+                if ext == ".py":
+                    qualified_name = resolve_fqn_from_ast(node, Path(filepath), Path("."), code_bytes) or func_name
+                    calls = self.call_extractors[ext].extract_calls(chunk_content)
+                
+                elif ext == ".cs":
+                    ns_match = re.search(r'namespace\s+([a-zA-Z0-9_.]+)', code)
+                    ns = ns_match.group(1) if ns_match else ""
+                    qualified_name = f"{ns}.{func_name}" if ns else func_name
+                    
+                    if self.csharp_call_query:
+                        # chunk_content는 이미 UTF-8 문자열이므로 안전하게 인코딩 가능
+                        chunk_bytes = chunk_content.encode("utf-8")
+                        call_tree = parser.parse(chunk_bytes)
+                        call_captures = self.csharp_call_query.captures(call_tree.root_node)
+                        for c_node, c_tag in call_captures:
+                            call_name = chunk_bytes[c_node.start_byte:c_node.end_byte].decode("utf-8")
+                            calls.append(call_name)
 
                 chunks.append(CodeChunk(
                     name=func_name,
                     type=tag,
                     content=chunk_content,
-                    filepath=normalized_filepath,  # ⭐ 정규화된 경로 저장
-                    start_line=start_line_idx + 1,
-                    language="python",
+                    filepath=normalized_filepath,
+                    start_line=start_line + 1,
+                    language=self.specs[ext].name,
                     qualified_name=qualified_name,
-                    module_path=qualified_name.rsplit('.', 1)[0] if '.' in qualified_name else "",
-                    imports=file_imports,
-                    docstring=docstring,
-                    calls=calls
+                    module_path=str(Path(filepath).parent),
+                    calls=list(set(calls)),
+                    docstring=""
                 ))
                 processed_nodes.add(node)
-
+            
             return chunks
 
         except Exception as e:
-            print(f"⚠️ Error parsing {filepath}: {e}")
+            print(f"⚠️ Error parsing code {filepath}: {e}")
             return []
