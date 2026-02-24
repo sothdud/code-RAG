@@ -22,9 +22,10 @@ The Knowledge Graph stores **Function/Method Call Relationships** for multiple l
 - `View` (XAML views)
 
 **Edges:**
-- `(:Function)-[:CALLS]->(:Function)` - Function calls
-- `(:Method)-[:CALLS]->(:Method)` - Method calls
-- `(:View)-[:BINDS]->(:Property)` - XAML data binding
+- `(:Function)-[:CALLS]->(:Function)` - Function calls (Python)
+- `(:Method)-[:CALLS]->(:Method)` - Method calls (C#, Python)
+- `(:View)-[:BINDS]->(:Property)` - XAML data binding (e.g., UI Elements binding to ViewModel Properties/Commands)
+- `(:Property)-[:CALLS]->(:Method)` - Command Properties invoking actual Methods via Delegates (e.g., RelayCommand in C#)
 
 **Naming Conventions:**
 - Python: `module.path.ClassName.method_name`
@@ -35,6 +36,7 @@ Use this to trace logic flow across languages (e.g., "Which C# method does this 
 </knowledge_graph_schema>
 """
 
+# 👇 수정된 부분: 응답 스타일에 코드 원본 출력 강제 지시 추가
 SYSTEM_PROMPT = f"""You're a helpful coding assistant analyzing a codebase that contains Python, C#, and XAML code.
 
 {GRAPH_SCHEMA_INFO}
@@ -44,6 +46,8 @@ SYSTEM_PROMPT = f"""You're a helpful coding assistant analyzing a codebase that 
 - Talk like explaining to a colleague - conversational but professional
 - Cite code locations: "ObjectTestViewModel.cs 269번 줄에서..."
 - If info is missing from context: acknowledge what you found + guide next steps (don't just say "없어요" and stop)
+- **CRITICAL: ALWAYS include the actual code snippets in your response using markdown code blocks (```csharp, ```python, ```xml).**
+- **CRITICAL: Do NOT just summarize the logic. You MUST show the exact code proving your explanation.**
 
 **Process:**
 Use <thinking> to analyze, then answer clearly in polite Korean.
@@ -174,6 +178,7 @@ Question: {query}
 Analyze the MVVM architecture - how the View, ViewModel, and Model connect. Use <thinking> to trace the bindings and data flow, then explain it naturally.
 """
 
+# 👇 수정된 부분: LLM이 최종 답변을 생성할 때 가장 많이 쓰이는 프롬프트에 재차 강조
 def get_general_prompt(query: str, context: str) -> str:
     return f"""
 {SYSTEM_PROMPT}
@@ -184,4 +189,5 @@ Here's the relevant code:
 Question: {query}
 
 Analyze the code in <thinking> tags, then answer naturally like you're chatting with a teammate.
+**IMPORTANT RULE**: You MUST include the exact code blocks (using ``` markdown format) from the Context above to support your explanation. Do not just summarize the code.
 """
