@@ -237,6 +237,7 @@ class VectorStore:
                 calls=payload.get('calls', []),
                 called_by=payload.get('called_by', []),
                 imports=payload.get('imports', []),
+                docstring=payload.get('docstring', ''),
                 module_path=payload.get('module_path', ''),
             )
             nodes[qn] = chunk
