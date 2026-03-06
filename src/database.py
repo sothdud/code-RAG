@@ -17,10 +17,10 @@ load_dotenv()
 
 class VectorStore:
     def __init__(self, collection_name: str = None):
-        self.client = QdrantClient(url=os.getenv("QDRANT_URL"))
+        self.client = QdrantClient(url=os.getenv("QDRANT_URL"), timeout=60.0)
         self.collection = collection_name or os.getenv("COLLECTION_NAME")
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model_path = os.getenv("EMBEDDING_MODEL_PATH", "jinaai/jina-embeddings-v2-base-en")
+        model_path = os.getenv("EMBEDDING_MODEL_PATH")
 
         print(f"ðŸ“¡ Loading Embedding Model: {model_path}")
         print(f"ðŸš€ Acceleration Device: {device.upper()}")
@@ -33,7 +33,7 @@ class VectorStore:
         self.embedding_dim = self.embedder.get_sentence_embedding_dimension()
         print(f"ðŸ“ Embedding Dimension: {self.embedding_dim}")
 
-        # ì´ˆê¸° ì—°ê²° í…ŒìŠ¤íŠ¸
+    
         try:
             self._ensure_collection_exists()
         except Exception as e:
@@ -55,7 +55,6 @@ class VectorStore:
             print(f"âš ï¸ Error checking collection: {e}")
 
     def recreate_collection(self):
-        """[v1.7.3 í˜¸í™˜] ì»¬ë ‰ì…˜ ì‚­ì œ í›„ ìž¬ìƒì„±"""
         print(f"ðŸ—‘ï¸ Recreating Qdrant collection: {self.collection}")
         
         try:
@@ -78,7 +77,7 @@ class VectorStore:
         except Exception as e:
             print(f"âš ï¸ Error recreating collection: {e}")
 
-    def upsert_chunks(self, chunks: list[CodeChunk], batch_size: int = 5):
+    def upsert_chunks(self, chunks: list[CodeChunk], batch_size: int = 2):
         total = len(chunks)
 
         for i in range(0, total, batch_size):
@@ -140,12 +139,21 @@ class VectorStore:
                     self.client.upsert(
                         collection_name=self.collection,
                         points=points,
-                        wait=True
+                        wait=False
                     )
                     print(f"  âœ“ Saved batch {i // batch_size + 1}/{(total + batch_size - 1) // batch_size}")
 
             except Exception as e:
-                print(f"  âœ— Batch {i // batch_size + 1} failed: {e}")
+                print(f"  ✗ Batch {i // batch_size + 1} failed: {e}, retrying...")
+                try:
+                    self.client.upsert(
+                        collection_name=self.collection,
+                        points=points,
+                        wait=False
+                    )
+                    print(f"  ✔ Batch {i // batch_size + 1} saved on retry")
+                except Exception as e2:
+                    print(f"  ✗ Batch {i // batch_size + 1} retry also failed: {e2}")
 
             finally:
                 if 'vectors' in locals(): del vectors
@@ -240,7 +248,7 @@ class VectorStore:
                 docstring=payload.get('docstring', ''),
                 module_path=payload.get('module_path', ''),
             )
-            nodes[qn] = chunk
+            nodes[point.id] = chunk
             for callee in chunk.calls: edges[qn].append(callee)
             for caller in chunk.called_by: reverse_edges[qn].append(caller)
 
