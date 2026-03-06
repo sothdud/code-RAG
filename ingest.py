@@ -23,6 +23,7 @@ STATE_FILE = ".ingest_state.json"
 
 # ⭐ [수정] 지원할 확장자 목록에 C#과 XAML 추가
 SUPPORTED_EXTENSIONS = {'.py', '.cs', '.xaml'}
+FORCE_REINDEX = os.getenv("FORCE_REINDEX", "false").lower() == "true"
 
 def calculate_file_hash(filepath: Path) -> str:
     """파일 내용의 MD5 해시를 계산합니다."""
@@ -97,7 +98,7 @@ def main():
             current_state[rel_path] = file_hash
             
             # 변경되었거나 새로 추가된 파일인지 확인
-            if rel_path not in old_state or old_state[rel_path] != file_hash:
+            if rel_path not in old_state or old_state[rel_path] != file_hash or FORCE_REINDEX:
                 files_to_process.append(str(file_path))
 
     # 삭제된 파일 처리
@@ -135,6 +136,8 @@ def main():
         all_chunks_for_graph.append(chunk)
 
     console.print(f"   > Generated {len(chunks_to_upsert)} new chunks.")
+    for c in chunks_to_upsert:
+        print(f"  - [{c.language}] {c.name} / type={c.type}")
 
     # 4. 벡터 DB 업서트 (Vector DB Upsert)
     if chunks_to_upsert:
