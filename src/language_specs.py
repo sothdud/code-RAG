@@ -2,14 +2,17 @@ from dataclasses import dataclass
 
 @dataclass
 class LanguageSpec:
-    name: str             # tree-sitter 언어 이름
-    extension: str        # 파일 확장자
-    structure_query: str  # 클래스/함수/프로퍼티 추출 쿼리
-    call_query: str       # 함수 호출 추출 쿼리
+    name: str
+    db_name: str            # tree-sitter 언어 이름 (또는 DB 저장용 언어명)
+    extension: str          # 파일 확장자
+    structure_query: str    # 클래스/함수/프로퍼티 추출 쿼리 (Tree-sitter용)
+    call_query: str         # 함수 호출 추출 쿼리 (Tree-sitter용)
+    binding_pattern: str = ""
 
-# 1. Python 설정 (기존 로직 유지)
+# 1. Python 설정
 PYTHON_SPEC = LanguageSpec(
     name="python",
+    db_name="python",
     extension=".py",
     structure_query="""
         (class_definition
@@ -25,9 +28,10 @@ PYTHON_SPEC = LanguageSpec(
     call_query="" # CallExtractor 사용하므로 공란
 )
 
-# 2. C# 설정 (새로 추가)
+# 2. C# 설정 
 CSHARP_SPEC = LanguageSpec(
     name="c_sharp",
+    db_name="c_sharp",
     extension=".cs",
     structure_query="""
     (namespace_declaration
@@ -46,6 +50,11 @@ CSHARP_SPEC = LanguageSpec(
         body: (block) @body
     ) @function
     
+    (constructor_declaration
+        name: (identifier) @name
+        body: (block) @body
+    ) @function
+    
     (property_declaration
         name: (identifier) @name
     ) @property
@@ -59,18 +68,21 @@ CSHARP_SPEC = LanguageSpec(
             name: (identifier) @method_name
         )
     )
+
+    (object_creation_expression
+        (argument_list
+            (argument (identifier) @func_name)
+        )
+    )
     """
 )
 
-# src/language_specs.py 맨 아래에 추가
-
+# 3. XAML 설정 (정규식 기반)
 XAML_SPEC = LanguageSpec(
-    name="html",  # XML 전용 파서가 없을 경우 HTML 파서를 사용해도 XAML 구조(태그) 분석이 가능합니다.
+    name="xaml",         
+    db_name="xaml",
     extension=".xaml",
-    structure_query="""
-    (element
-        (start_tag (tag_name) @name)
-    ) @element
-    """,
-    call_query=""  # UI 파일이므로 함수 호출은 추출하지 않음
+    structure_query="", 
+    call_query="",       
+    binding_pattern=r'\{Binding\s+(?:Path=)?([a-zA-Z0-9_.]+)'
 )

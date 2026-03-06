@@ -3,12 +3,12 @@ import re
 import requests
 from pathlib import Path
 from typing import List, Optional
-
+from bs4 import BeautifulSoup
 from tree_sitter_languages import get_language, get_parser
 from .models import CodeChunk
 from .call_extractor import CallExtractor
 from .fqn_resolver import resolve_fqn_from_ast
-from .language_specs import PYTHON_SPEC, CSHARP_SPEC, XAML_SPEC
+from .language_specs import PYTHON_SPEC, CSHARP_SPEC, XAML_SPEC, LanguageSpec
 
 class ASTParser:
     def __init__(self, context_lines: int = 5):
@@ -26,6 +26,10 @@ class ASTParser:
         self.csharp_call_query = None
 
         for ext, spec in self.specs.items():
+            # 💡 Tree-sitter 쿼리가 없는 언어(예: XAML)는 Tree-sitter 초기화를 건너뜀
+            if not spec.structure_query:
+                continue
+
             try:
                 lang = get_language(spec.name)
                 self.parsers[ext] = get_parser(spec.name)
@@ -42,11 +46,13 @@ class ASTParser:
     def _generate_llm_summary(self, code_snippet: str) -> str:
         ollama_url = os.getenv("OLLAMA_URL")
         llm_model = os.getenv("LLM_MODEL", "qwen3-coder:30b")
-        if not ollama_url: return ""
+        
+        if not ollama_url: 
+            return "⚠️ OLLAMA_URL이 설정되지 않았습니다."
             
         prompt = (
-            "문장 끝은 반드시 '~니다.' 형태의 정중한 평어체로 통일해 (ex. 합니다. or 입니다.)"
-            "다음 코드의 역할과 기능을 2~3줄로 간단히 요약해. "
+            "문장 끝은 반드시 '~니다.' 형태의 정중한 평어체로 통일해 (ex. 합니다. or 입니다.)\n"
+            "다음 코드의 역할과 기능을 2~3줄로 간단히 요약해. \n"
             "마크다운이나 부가 설명 없이 핵심 요약 텍스트만 대답해.\n\n"
             f"코드:\n{code_snippet}"
         )
@@ -54,23 +60,27 @@ class ASTParser:
         payload = {"model": llm_model, "prompt": prompt, "stream": False}
         
         try:
-            #타임아웃을 60초에서 120초로 넉넉하게 늘립니다.
+            # 타임아웃 120초로 넉넉하게 설정
             response = requests.post(ollama_url, json=payload, timeout=120)
             if response.status_code == 200:
                 return response.json().get("response", "").strip()
+            else:
+                return f"⚠️ LLM API 오류: 상태 코드 {response.status_code}"
         except Exception as e:
-            print(f"\n⚠️ LLM 요약 실패 (TimeOut 등): {e}")   
-            return "⚠️ AI 요약 생성 실패 (답변 시간 초과 또는 모델 오류)"
-            
-        return "⚠️ 요약 생성 실패 (알 수 없는 오류)"
+            print(f"\n⚠️ LLM 요약 실패: {e}")   
+            return "⚠️ AI 요약 생성 실패"
 
     def parse(self, filepath: str) -> List[CodeChunk]:
         ext = os.path.splitext(filepath)[1].lower()
-        if ext == ".xaml":
-            return self._parse_xaml(filepath)
-        if ext in self.specs:
+        spec = self.specs.get(ext)
+        if not spec: 
+            return []
+
+        # 💡 Spec에 정규식 패턴이 정의되어 있다면 정규식 파서로 라우팅
+        if spec.binding_pattern:
+            return self._parse_regex_from_spec(filepath, spec)
+        else:
             return self._parse_code(filepath, ext)
-        return []
 
     def _normalize_filepath(self, filepath: str) -> str:
         path = Path(filepath)
@@ -101,41 +111,67 @@ class ASTParser:
                 continue
         return ""
 
-    def _parse_xaml(self, filepath: str) -> List[CodeChunk]:
+    # 💡 Spec 기반 정규식 파서 (XAML 처리용)
+    def _parse_regex_from_spec(self, filepath: str, spec: LanguageSpec) -> List[CodeChunk]:
         try:
             content = self._read_file_safe(filepath)
             if not content: return []
             
             normalized_filepath = self._normalize_filepath(filepath)
-            chunks = []
 
-            x_class_match = re.search(r'x:Class="([^"]+)"', content)
-            if x_class_match:
-                qualified_name = x_class_match.group(1)
+            # 1. BeautifulSoup으로 XML 파싱 (lxml 엔진 사용)
+            soup = BeautifulSoup(content, 'xml')
+
+            # 2. x:Class 추출 (View의 Qualified Name 결정)
+            # 루트 태그에서 x:Class 속성을 찾습니다. 정규식보다 훨씬 안전합니다.
+            root_tag = soup.find()
+            if root_tag and root_tag.has_attr('x:Class'):
+                qualified_name = root_tag['x:Class']
                 name = qualified_name.split('.')[-1]
             else:
                 name = Path(filepath).stem
                 qualified_name = name
 
-            bindings = re.findall(r'\{Binding\s+(?:Path=)?([a-zA-Z0-9_.]+)', content)
-            valid_bindings = sorted(list(set([b for b in bindings if b])))
+            # 3. Binding 구문 추출 (ViewModel과의 의존성 Edge 생성)
+            calls = set()
+            if spec.binding_pattern:
+                binding_regex = re.compile(spec.binding_pattern)
+                
+                # 모든 태그를 순회하며 속성값(Attribute)을 검사
+                for tag in soup.find_all(True):
+                    for attr_name, attr_value in tag.attrs.items():
+                        # 속성값이 문자열이고 '{Binding'을 포함하는 경우에만 정규식 검사
+                        if isinstance(attr_value, str) and '{Binding' in attr_value:
+                            match = binding_regex.search(attr_value)
+                            if match:
+                                calls.add(match.group(1))
 
-            chunks.append(CodeChunk(
+            calls = sorted(list(calls))
+
+            # 💡 XAML 내용 전체를 LLM에 넘겨서 요약 생성
+            print(f"🔄 요약 생성 중... [{name} (XAML View)]")
+            docstring = self._generate_llm_summary(content)
+
+            return [CodeChunk(
                 name=name,
                 type="view",
                 content=content,
                 filepath=normalized_filepath,
                 start_line=1,
-                language="xaml",
+                language=spec.db_name,
                 qualified_name=qualified_name,
                 module_path=str(Path(filepath).parent),
-                calls=valid_bindings,
-                docstring="WPF XAML View" # XAML은 화면 구성이므로 일단 고정
-            ))
-            return chunks
+                calls=calls, # 추출된 데이터 바인딩이 edges로 사용됨
+                docstring=docstring 
+            )]
+            
         except Exception as e:
+            print(f"⚠️ XML 파싱 실패 ({filepath}): {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
+    # 기존 Tree-sitter 기반 코드 파서 (Python, C# 처리용)
     def _parse_code(self, filepath: str, ext: str) -> List[CodeChunk]:
         try:
             code_bytes = self._read_file_as_utf8_bytes(filepath)
@@ -152,7 +188,7 @@ class ASTParser:
             if not parser or not query: return []
             
             tree = parser.parse(code_bytes)
-            captures = query.captures(tree.root_node)
+            captures = sorted(query.captures(tree.root_node), key=lambda x: x[0].start_byte)  # ← 정렬 추가
 
             chunks = []
             processed_nodes = set()
@@ -175,8 +211,11 @@ class ASTParser:
 
                 if ext == ".py":
                     qualified_name = resolve_fqn_from_ast(node, Path(filepath), Path("."), code_bytes) or func_name
-                    calls = self.call_extractors[ext].extract_calls(chunk_content)
-                    docstring = self._generate_llm_summary(chunk_content) # 파이썬도 LLM 요약 적용
+                    if ext in self.call_extractors:
+                        calls = self.call_extractors[ext].extract_calls(chunk_content)
+                    
+                    print(f"🔄 요약 생성 중... [{func_name}]")
+                    docstring = self._generate_llm_summary(chunk_content) 
                 
                 elif ext == ".cs":
                     ns_match = re.search(r'namespace\s+([a-zA-Z0-9_.]+)', code)
@@ -191,7 +230,7 @@ class ASTParser:
                             call_name = chunk_bytes[c_node.start_byte:c_node.end_byte].decode("utf-8")
                             calls.append(call_name)
                     
-                    # 💡 주석 추출 로직을 버리고, 무조건 LLM(Ollama)에게 요약 요청!
+                    print(f"🔄 요약 생성 중... [{func_name}]")
                     docstring = self._generate_llm_summary(chunk_content)
 
                 chunks.append(CodeChunk(
@@ -204,11 +243,12 @@ class ASTParser:
                     qualified_name=qualified_name,
                     module_path=str(Path(filepath).parent),
                     calls=list(set(calls)),
-                    docstring=docstring # 👈 LLM이 작성한 요약이 저장됩니다!
+                    docstring=docstring # LLM이 작성한 요약 저장
                 ))
                 processed_nodes.add(node)
             
             return chunks
 
         except Exception as e:
+            print(f"⚠️ 코드 파싱 실패 ({filepath}): {e}")
             return []
