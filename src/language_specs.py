@@ -3,13 +3,13 @@ from dataclasses import dataclass
 @dataclass
 class LanguageSpec:
     name: str
-    db_name: str            # tree-sitter 언어 이름 (또는 DB 저장용 언어명)
+    db_name: str            # tree-sitter 언어 이름
     extension: str          # 파일 확장자
-    structure_query: str    # 클래스/함수/프로퍼티 추출 쿼리 (Tree-sitter용)
-    call_query: str         # 함수 호출 추출 쿼리 (Tree-sitter용)
+    structure_query: str    # 클래스/함수/프로퍼티 추출 쿼리 
+    call_query: str         # 함수 호출 추출 쿼리 
     binding_pattern: str = ""
 
-# 1. Python 설정
+# 1.Python 설정
 PYTHON_SPEC = LanguageSpec(
     name="python",
     db_name="python",
@@ -25,10 +25,10 @@ PYTHON_SPEC = LanguageSpec(
             body: (block) @body
         ) @function
     """,
-    call_query="" # CallExtractor 사용하므로 공란
+    call_query="" 
 )
 
-# 2. C# 설정 
+# 2.C# 설정 
 CSHARP_SPEC = LanguageSpec(
     name="c_sharp",
     db_name="c_sharp",
@@ -77,7 +77,7 @@ CSHARP_SPEC = LanguageSpec(
     """
 )
 
-# 3. XAML 설정 (정규식 기반)
+# 3.XAML 설정 
 XAML_SPEC = LanguageSpec(
     name="xaml",         
     db_name="xaml",
@@ -85,4 +85,42 @@ XAML_SPEC = LanguageSpec(
     structure_query="", 
     call_query="",       
     binding_pattern=r'\{Binding\s+(?:Path=)?([a-zA-Z0-9_.]+)'
+)
+
+# 4. C/C++ 설정
+CPP_SPEC = LanguageSpec(
+    name="cpp",
+    db_name="cpp",
+    extension=".cpp",  # .h, .hpp, .c 
+    structure_query="""
+    (namespace_definition
+        name: (namespace_identifier) @namespace
+        body: (declaration_list) @body
+    ) @namespace_block
+
+    (class_specifier
+        name: (type_identifier) @name
+        body: (field_declaration_list) @body
+    ) @class
+
+    (struct_specifier
+        name: (type_identifier) @name
+        body: (field_declaration_list) @body
+    ) @class
+
+    (function_definition) @function
+    """,
+    call_query="""
+    (call_expression
+        function: (identifier) @func_name
+    )
+    (call_expression
+        function: (field_expression
+            field: (field_identifier) @method_name
+        )
+    )
+    (call_expression
+        function: (qualified_identifier) @func_name
+    )
+    """
 )
