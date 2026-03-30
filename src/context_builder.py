@@ -1,5 +1,5 @@
 """
-LLM용 컨텍스트 생성 (Graph-Code의 RAG 방식)
+LLM용 컨텍스트 생성
 """
 
 from .models import CodeChunk
