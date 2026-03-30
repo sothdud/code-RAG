@@ -13,8 +13,7 @@ load_dotenv()
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-# ── SQL DDL ────────────────────────────────────────────────────────────────────
-# .format() / f-string 충돌 방지: DDL 내 {} 리터럴이 많으므로 리스트로 분리
+
 def _build_ddl(dim: int) -> list:
     """실행 순서대로 DDL 구문 리스트를 반환합니다."""
     return [
@@ -23,7 +22,7 @@ def _build_ddl(dim: int) -> list:
         (
             "CREATE TABLE IF NOT EXISTS code_chunks ("
             "id UUID PRIMARY KEY DEFAULT gen_random_uuid(),"
-            "qualified_name TEXT NOT NULL UNIQUE,"          # ← UNIQUE: 중복 upsert 기준
+            "qualified_name TEXT NOT NULL UNIQUE,"          
             "name TEXT NOT NULL,"
             "type TEXT NOT NULL,"
             "content TEXT NOT NULL,"
@@ -139,7 +138,7 @@ class VectorStore:
         finally:
             self._release(conn)
 
-    #임베딩 시 원본 코드가 아닌 "요약본(summary)"을 사용하도록 수정
+    #임베딩 시 원본 코드가 아닌 요약본을 사용
     def _make_embed_text(self, chunk: CodeChunk) -> str:
         return f"Name: {chunk.name}\nType: {chunk.type}\nSummary: {chunk.summary}\nPath: {chunk.filepath}"
 
@@ -206,7 +205,7 @@ class VectorStore:
                     c for c in chunk.calls
                     if isinstance(c, str)
                     and (
-                        # __vm_context__ 마커는 길이/특수문자 제한 없이 통과
+
                         c.startswith("__vm_context__:")
                         or (
                             len(c) <= 200
@@ -285,7 +284,7 @@ class VectorStore:
                             self._upsert_single(chunk, vec)
                         except Exception as oom2:
                             print(f"  ✗ [{chunk.name}] failed: {oom2}")
-    # ── 벡터 검색 ────────────────────────────────────────────────────────
+    # 벡터 검색 
     def search(
         self,
         query: str,
@@ -331,7 +330,7 @@ class VectorStore:
         finally:
             self._release(conn)
 
-    # ── 파일 경로 검색 ────────────────────────────────────────────────────────
+    # 파일 경로 검색
     def search_by_filepath(self, filepath_keyword: str, top_k: int = 10) -> list[dict]:
         conn = self._conn()
         try:
@@ -354,7 +353,7 @@ class VectorStore:
         finally:
             self._release(conn)
 
-    # ── qualified_name으로 청크 조회 ─────────────────────────────────────────
+    #qualified_name으로 청크 조회
     def retrieve_by_filenames(self, names: list[str]) -> list[dict]:
         if not names:
             return []
@@ -379,7 +378,7 @@ class VectorStore:
         finally:
             self._release(conn)
 
-    # ── 전체 청크 스크롤 (BM25 인덱스 구축용) ───────────────────────────────
+    #전체 청크 스크롤
     def scroll_all(self) -> list[dict]:
         conn = self._conn()
         try:
@@ -400,7 +399,7 @@ class VectorStore:
         finally:
             self._release(conn)
 
-    # ── 리랭킹 ───────────────────────────────────────────────────────────────
+    # reranking
     def rerank(self, query: str, results: list[dict], top_k: int = 10) -> list[dict]:
         if not results:
             return []
@@ -409,7 +408,7 @@ class VectorStore:
         ranked   = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
         return [item[0] for item in ranked[:top_k]]
 
-    # ── 호출 그래프 (call_edges 테이블) ──────────────────────────────────────
+    # call graph
     def save_call_edges(self, edges: dict[str, list[str]]):
         if not edges:
             return
@@ -439,10 +438,10 @@ class VectorStore:
         finally:
             self._release(conn)
 
-    # ── WITH RECURSIVE 기반 그래프 탐색 ──────────────────────────────────────
-
+    #WITH RECURSIVE 기반 그래프 탐색
+#순방향
     def get_callees_recursive(self, qualified_name: str, max_depth: int = 3) -> list[dict]:
-        """순방향 탐색: qualified_name이 직·간접적으로 호출하는 모든 함수."""
+
         sql = """
         WITH RECURSIVE callee_tree AS (
             SELECT e.callee_qn AS qn, 1 AS depth,
@@ -468,9 +467,9 @@ class VectorStore:
             return []
         finally:
             self._release(conn)
-
+#역방향
     def get_callers_recursive(self, qualified_name: str, max_depth: int = 3) -> list[dict]:
-        """역방향 탐색: qualified_name을 직·간접적으로 호출하는 모든 함수."""
+
         sql = """
         WITH RECURSIVE caller_tree AS (
             SELECT e.caller_qn AS qn, 1 AS depth,
@@ -612,7 +611,7 @@ class VectorStore:
         finally:
             self._release(conn)
 
-    # ── CallGraph 로드 (하위 호환) ────────────────────────────────────────────
+    # CallGraph 로드 
     def load_call_graph(self):
         from .models import CallGraph
         from collections import defaultdict
