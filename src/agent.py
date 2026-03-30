@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from ollama import Client  # 💡 공식 SDK 추가
 from . import prompts
 
-# ── Tool 정의 (기존 구조 완벽 유지) ──────────────────────────────────────────
 @dataclass
 class Tool:
     name: str
@@ -41,14 +40,13 @@ Stop calling tools when you have enough code to answer confidently.
 
 
 class CodebaseAgent:
-    # 💡 app.py에서 넘겨주는 파라미터 3개 모두 정상적으로 받도록 복구
+
     def __init__(self, search_engine, vector_store, graph_store, max_steps: int = 6):
         self.search   = search_engine
         self.db       = vector_store
         self.graph    = graph_store
         self.max_steps = max_steps
 
-        # 💡 Ollama 클라이언트 초기화 (.env 설정 반영)
         host_url = os.getenv("OLLAMA_URL", "http://localhost:11434").replace("/api/generate", "")
         self.client = Client(host=host_url)
         self.agent_model = os.getenv("AGENT_MODEL", "qwen3:30b")
@@ -116,7 +114,7 @@ class CodebaseAgent:
             ),
         ]
 
-    # ── 메인 ReAct 루프 (Streamlit 연동을 위해 yield 복구) ──────────────────────────
+    #ReAct 루프
     def run(self, query: str, llm) -> Generator[str, None, None]:
         messages = [
             {"role": "system", "content": AGENT_SYSTEM_PROMPT},
@@ -130,13 +128,12 @@ class CodebaseAgent:
         while steps < self.max_steps:
             steps += 1
 
-            # 💡 핵심: 통신 에러를 내던 llm.py 대신, Ollama 공식 SDK가 도구를 고르게 함
             try:
                 response = self.client.chat(
                     model=self.agent_model,
                     messages=messages,
                     tools=tool_specs,
-                    stream=False # 에이전트는 깔끔하게 JSON만 뱉도록 설정
+                    stream=False # JSON만
                 )
                 msg = response.message
                 tool_calls = getattr(msg, 'tool_calls', [])
@@ -154,7 +151,7 @@ class CodebaseAgent:
                 if not tool:
                     break
 
-                # 도구 실행 (기존 로직 그대로)
+                # 도구 실행 
                 result_text, summary, chunks = tool.function(**tool_args)
                 for c in chunks:
                     qn = c.get("qualified_name", c.get("name", ""))
@@ -164,18 +161,16 @@ class CodebaseAgent:
                 # Streamlit UI용 로그 생성
                 tool_log.append(f"{_icon(tool_name)} **{tool_name}**({_args_str(tool_args)}): {summary}")
 
-                # 대화 기록에 추가 (모델의 선택과 도구의 결과)
                 messages.append(msg)
                 messages.append({
                     "role": "tool",
                     "content": str(result_text),
                 })
 
-            # ── 도구 사용 끝! 최종 답변 생성 ──────────────────────────────────
+  
             else:
                 yield "__TOOL_LOG__" + json.dumps(tool_log)
 
-                # qwen3-coder:30b로 최종 코드 분석 답변 (기존 llm.py의 스트리밍 활용)
                 final_chunks = list(collected.values())[:14]
                 wrapped      = [{"chunk": c} for c in final_chunks]
                 context      = prompts.format_context_xml(wrapped)
@@ -194,7 +189,7 @@ class CodebaseAgent:
         context      = prompts.format_context_xml(wrapped)
         yield from llm.generate_response(prompts.get_general_prompt(query, context), query)
 
-    # ── 도구 구현 (기존 로직 100% 동일) ──────────────────────────────────────────
+    #도구 구현
 
     def _tool_semantic_search(self, query: str, top_k: int = 5):
         try:
@@ -276,7 +271,7 @@ class CodebaseAgent:
         except Exception as e:
             return f"Error: {e}", "error", []
 
-# ── 헬퍼 ──────────────────────────────────────────────────────────────────────
+
 def _icon(name: str) -> str:
     return {"semantic_search": "🔍", "get_code_snippet": "📄", "find_by_name": "🎯", "query_knowledge_graph": "🕸️", "read_file": "📂"}.get(name, "⚙️")
 
