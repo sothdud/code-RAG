@@ -1,5 +1,5 @@
 """
-함수 호출 관계 추출 전담 모듈
+함수 호출 관계 추출
 """
 
 from tree_sitter_languages import get_language, get_parser
@@ -85,7 +85,7 @@ class CallExtractor:
             for node, tag in captures:
                 func_name = code[node.start_byte:node.end_byte]
                 
-                # ⭐ 유효성 검증 추가
+
                 if self._is_valid_function_name(func_name):
                     calls.append(func_name)
 
